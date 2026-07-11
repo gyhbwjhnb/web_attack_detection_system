@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 日志文件
+logs/*.log
+
+# 临时数据
+*.pcap
+data/models/
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# 环境变量
+.env
