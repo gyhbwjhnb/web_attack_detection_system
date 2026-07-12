@@ -213,6 +213,7 @@ class TrafficRecord:
         d["protocol"] = self.protocol.value
         d["src"] = self.src.to_dict()
         d["dst"] = self.dst.to_dict()
+        d["flags"] = int(self.flags) if hasattr(self.flags, '__int__') else self.flags
         d.pop("payload_raw", None)
         return d
 
