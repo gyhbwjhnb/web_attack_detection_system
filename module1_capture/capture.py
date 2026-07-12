@@ -325,31 +325,123 @@ class CaptureEngine(ICaptureEngine):
             self._running = False
 
     def _auto_select_interface(self) -> Optional[str]:
-        """自动选择可用网卡"""
+        """自动选择可用网卡，优先物理网卡
+
+        选择策略（优先级降序）：
+          1. 物理有线网卡（Ethernet / 以太网）且有有效 IP
+          2. 物理无线网卡（Wi-Fi / WLAN）且有有效 IP
+          3. 其他非虚拟、非回环网卡且有有效 IP
+          4. 任意有 IP 的网卡（含虚拟适配器，降级选择）
+          5. 任意非回环网卡（无 IP 兜底）
+
+        自动过滤的虚拟适配器：
+          VMware / VirtualBox / Hyper-V / Docker / WSL /
+          Npcap Loopback / Bluetooth 等
+        """
         try:
-            from scapy.all import get_working_ifaces, conf
-            from scapy.config import conf
+            from scapy.all import get_working_ifaces
 
             ifaces = get_working_ifaces()
             if not ifaces:
+                # 兜底：尝试 scapy IFACES 全局列表
+                try:
+                    from scapy.all import IFACES
+                    ifaces = IFACES
+                except (ImportError, AttributeError):
+                    pass
+
+            if not ifaces:
+                logger.error("未发现可用网卡（get_working_ifaces 返回空）")
+                logger.info("请检查：① Npcap(Windows) / LibPcap(Linux) 是否安装；"
+                            "② 是否有管理员权限；③ 网卡是否启用")
                 return None
 
-            # 优先选择有 IP 的非回环接口
+            # ── 虚拟/回环网卡关键词 ──
+            virtual_keywords = [
+                'virtual', 'vmware', 'vbox', 'virtualbox',
+                'hyper-v', 'hyperv', 'docker', 'wsl',
+                'npcap loopback', 'loopback adapter',
+                'bluetooth', 'vmxnet', 'pbl', 'nfl',
+            ]
+
+            def _iface_text(iface) -> str:
+                """提取接口所有可读文本用于关键词匹配"""
+                parts = [
+                    iface.name if hasattr(iface, 'name') else str(iface),
+                    iface.description if hasattr(iface, 'description') else '',
+                    iface.win_name if hasattr(iface, 'win_name') else '',
+                ]
+                return ' '.join(parts).lower()
+
+            def _iface_ip(iface) -> str:
+                return iface.ip if hasattr(iface, 'ip') else ''
+
+            def _iface_name(iface) -> str:
+                return iface.name if hasattr(iface, 'name') else str(iface)
+
+            def _iface_desc(iface) -> str:
+                return iface.description if hasattr(iface, 'description') else _iface_name(iface)
+
+            # ── 分级 ──
+            buckets = {0: [], 1: [], 2: [], 3: [], 4: []}
+            # 0=有线 1=无线 2=其他物理 3=虚拟(有IP) 4=无IP/回环
+
             for iface in ifaces:
-                name = iface.name if hasattr(iface, 'name') else str(iface)
-                ip = iface.ip if hasattr(iface, 'ip') else ''
-                if ip and ip != '127.0.0.1' and name != 'lo':
-                    logger.info(f"自动选择网卡: {name} ({ip})")
+                name = _iface_name(iface)
+                ip = _iface_ip(iface)
+                text = _iface_text(iface)
+
+                is_loopback = (ip == '127.0.0.1' or name in ('lo', 'loopback'))
+                is_virtual = any(k in text for k in virtual_keywords)
+                has_valid_ip = bool(ip) and ip != '0.0.0.0' and not ip.startswith('169.254.')
+                has_any_ip = bool(ip) and ip != '0.0.0.0'
+
+                if is_loopback:
+                    buckets[4].append(iface)
+                elif has_valid_ip and not is_virtual:
+                    if 'ethernet' in text or '以太网' in text:
+                        buckets[0].append(iface)       # 有线
+                    elif 'wi-fi' in text or 'wlan' in text or '无线' in text:
+                        buckets[1].append(iface)       # 无线
+                    else:
+                        buckets[2].append(iface)       # 其他物理
+                elif has_any_ip and is_virtual:
+                    buckets[3].append(iface)           # 虚拟但有 IP
+                else:
+                    buckets[4].append(iface)           # 无 IP 或回环
+
+            # ── 按桶优选取第一个 ──
+            for level in range(4):  # 0→1→2→3
+                if buckets[level]:
+                    iface = buckets[level][0]
+                    name = _iface_name(iface)
+                    ip = _iface_ip(iface) or '(无 IP)'
+                    desc = _iface_desc(iface)
+                    labels = ['物理有线', '物理无线', '物理网卡', '虚拟网卡(降级)']
+                    logger.info(f"自动选择网卡[{labels[level]}]: {name} — {desc} ({ip})")
                     return name
 
-            # 兜底：返回第一个
-            first = ifaces[0]
-            name = first.name if hasattr(first, 'name') else str(first)
-            logger.info(f"自动选择网卡(兜底): {name}")
-            return name
+            # ── 彻底兜底：第一个非空桶 ──
+            for level in [4, 3, 2, 1, 0]:
+                if buckets[level]:
+                    iface = buckets[level][0]
+                    name = _iface_name(iface)
+                    ip = _iface_ip(iface) or '(无 IP)'
+                    desc = _iface_desc(iface)
+                    logger.warning(f"自动选择网卡(兜底): {name} — {desc} ({ip})")
+                    return name
+
+            # ── 全部失败：列出可用接口帮助用户 ──
+            logger.error("未找到可用网卡。可用接口列表：")
+            for iface in ifaces:
+                n = _iface_name(iface)
+                ip = _iface_ip(iface) or '(空)'
+                d = _iface_desc(iface)
+                logger.error(f"  {n:30s}  IP={ip:15s}  {d}")
+            return None
 
         except Exception as e:
-            logger.error(f"自动选择网卡失败: {e}")
+            logger.error(f"自动选择网卡异常: {e}", exc_info=True)
             return None
 
     # ==================== 便捷方法 ====================

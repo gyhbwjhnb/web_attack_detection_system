@@ -47,7 +47,8 @@ module1_capture/
 ├── __init__.py            ← 统一导出接口
 ├── capture.py             ← 抓包引擎（有状态，管理生命周期）
 ├── packet_parser.py       ← 协议解析（无状态纯函数）
-└── demo_module1.py        ← 一站式功能演示脚本
+├── demo_module1.py        ← 一站式功能演示脚本（模拟数据 + PCAP离线解析）
+└── demo_live_capture.py   ← 在线抓包演示脚本（需管理员权限 + Npcap）
 
 外部依赖（模块一运行时必需）：
   common/
@@ -396,6 +397,12 @@ def create_fake_http_record(method="GET", uri="/index.php?id=1",
 
 ### 方式一：运行演示脚本（推荐先看效果）
 
+**离线演示（无需权限/Pcap）：**
+```bash
+cd web_attack_detection_system
+python module1_capture/demo_module1.py
+```
+
 ```
 demo_module1.py 执行流程：
 
@@ -477,18 +484,29 @@ for r in records[:3]:
 ```bash
 # Windows: 以管理员身份运行终端
 # Linux: sudo python
+
+# 运行在线抓包演示脚本（含网卡列表、自动/手动选择、多网卡参考）
+python module1_capture/demo_live_capture.py
 ```
-```python
+
+该脚本会依次展示：
+
+  1. 列出系统所有可用网卡（含类型标签和 IP）
+  2. 自动选择最优物理网卡抓包
+  3. 手动指定网卡抓包（可选）
+  4. 多网卡综合抓包参考代码
+
+**快捷验证（一行命令）：**
+
+```bash
+python -c "
 from module1_capture import CaptureEngine
 engine = CaptureEngine()
-engine.set_on_traffic_callback(lambda r: print(
-    f"[{r.protocol.value}] {r.src.ip}:{r.src.port} → {r.dst.ip}:{r.dst.port}"
-))
-engine.start(interface=None, filter_expr="tcp")  # None=自动选网卡
-input("抓包中，按 Enter 停止...")
+engine.set_on_traffic_callback(lambda r: print(r))
+engine.start(interface=None, filter_expr='tcp', packet_count=4)
+input('抓包中，按 Enter 停止...\n')
 engine.stop()
-print(f"共捕获 {engine.get_packet_count()} 包")
-print(f"统计: {engine.get_statistics()}")
+"
 ```
 
 ---
