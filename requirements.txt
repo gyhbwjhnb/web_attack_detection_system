@@ -1,0 +1,19 @@
+# 常见网络攻击检测系统 (NIDS) 依赖
+# pip install -r requirements.txt
+
+# === 核心依赖 ===
+scapy>=2.5.0            # 数据包捕获与解析
+pyahocorasick>=2.0.0    # Aho-Corasick 多模式匹配（模块二）
+
+# === GUI 界面 ===
+PyQt5>=5.15.0           # 图形界面（模块四）
+
+# === 数据可视化 ===
+matplotlib>=3.7.0       # 图表绘制（模块四）
+
+# === 测试 ===
+pytest>=7.4.0           # 单元测试
+pytest-cov>=4.1.0       # 测试覆盖率
+
+# === 开发辅助 ===
+ipython>=8.0.0          # 交互式调试
