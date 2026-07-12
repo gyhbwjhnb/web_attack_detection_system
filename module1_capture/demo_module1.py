@@ -12,7 +12,7 @@
 
 运行方式:
     cd web_attack_detection_system
-    python demo_module1.py
+    python module1_capture/demo_module1.py
 
 如果想看特定部分，可以注释掉 skip_* 变量。
 ============================================================================
@@ -23,7 +23,7 @@ import time
 import json
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 from tests.test_module1 import MockScapyPacket, MockIP, MockTCP, MockRaw
 
 # ========================= 控制开关 =========================

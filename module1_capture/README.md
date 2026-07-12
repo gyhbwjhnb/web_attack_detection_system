@@ -46,7 +46,8 @@ module1_capture/
 ├── README.md              ← 本文档
 ├── __init__.py            ← 统一导出接口
 ├── capture.py             ← 抓包引擎（有状态，管理生命周期）
-└── packet_parser.py       ← 协议解析（无状态纯函数）
+├── packet_parser.py       ← 协议解析（无状态纯函数）
+└── demo_module1.py        ← 一站式功能演示脚本
 
 外部依赖（模块一运行时必需）：
   common/
@@ -57,9 +58,8 @@ module1_capture/
   ├── message_bus.py        ← 发布-订阅消息总线
   └── utils.py              ← 日志、配置管理器、IP工具
 
-测试与演示：
+测试：
   tests/test_module1.py     ← 32 项自动化单元测试
-  demo_module1.py           ← 一站式功能演示脚本
 ```
 
 ---
@@ -433,7 +433,7 @@ demo_module1.py 执行流程：
 
 ```bash
 cd web_attack_detection_system
-python demo_module1.py
+python module1_capture/demo_module1.py
 ```
 
 ### 方式二：运行自动化单元测试
