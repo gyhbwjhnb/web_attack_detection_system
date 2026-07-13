@@ -8,12 +8,16 @@
     python main.py --pcap sample.pcap --auto    # 自动跑 PCAP
 
 数据流（通过 MessageBus）:
-    [模块1] CaptureEngine ──EVENT_TRAFFIC_RECORD──> [模块3] AnomalyEngine
-                                                      │
-                                              EVENT_ANOMALY_ALERT
-                                                      │
-                                                      ▼
-                                                  [模块4] GUI
+    [模块1] CaptureEngine ──EVENT_TRAFFIC_RECORD──> [模块2] SignatureEngine (特征匹配)
+                              │                    [模块3] AnomalyEngine  (异常检测)
+                              │                          │
+                              │              EVENT_SIGNATURE_ALERT
+                              │              EVENT_ANOMALY_ALERT
+                              │                          │
+                              └──────────────────────────┼── [模块4] GUI
+                               EVENT_TRAFFIC_RECORD      │    (告警 + 流量展示)
+                                                         │
+                               EVENT_STATISTICS ─────────┘
 """
 
 import os
@@ -31,10 +35,11 @@ logger = setup_logger("main", "logs/main.log")
 
 
 class NIDSApp:
-    """系统集成器：模块1(抓包) → 模块3(异常检测) → 模块4(GUI)"""
+    """系统集成器：模块1(抓包) → 模块2(特征) + 模块3(异常检测) → 模块4(GUI)"""
 
     def __init__(self):
         self._capture = None
+        self._signature = None
         self._anomaly = None
         self._gui = None
 
@@ -48,16 +53,25 @@ class NIDSApp:
         self._gui.set_on_start(lambda: self._start_capture(interface, pcap_file, bpf_filter))
         self._gui.set_on_stop(lambda: self._stop_capture())
 
+        # ---- 模块2: 特征匹配检测（独立于模块3，并行处理） ----
+        from module2_signature import SignatureEngine, connect as sig_connect
+        self._signature = SignatureEngine()
+        loaded = self._signature.load_rules("data/signatures.json")
+        logger.info(f"模块2 加载 {loaded} 条特征规则")
+        print(f"[系统] 模块2 特征引擎已就绪，加载 {loaded} 条规则")
+        sig_connect(self._signature)
+
         # ---- 模块3: 异常检测（订阅 TrafficRecord） ----
         from module3_anomaly import AnomalyEngine
-        self._anomaly = AnomalyEngine()
+        from common.config import REALTIME_ANOMALY_CONFIG
+        self._anomaly = AnomalyEngine(config=REALTIME_ANOMALY_CONFIG)
         self._anomaly.start_baseline_learning(duration=60)
 
         # 订阅模块1发布的 TrafficRecord
         message_bus.subscribe(message_bus.EVENT_TRAFFIC_RECORD, self._on_traffic_record)
 
-        logger.info("三个模块已串联: 模块1(抓包) → 消息总线 → 模块3(异常检测) → 模块4(GUI)")
-        print("[系统] 三个模块已串联，学习模式开启（60秒后建立基线）")
+        logger.info("四个模块已串联: 模块1(抓包) → 模块2(特征) + 模块3(异常) → 模块4(GUI)")
+        print("[系统] 四个模块已串联，学习模式开启（60秒后建立基线）")
 
         if auto_start:
             self._gui._running = True

@@ -88,6 +88,36 @@ ANOMALY_CONFIG = {
     "enable_noise_reduction": True,
     "noise_min_severity": 3,
     "internal_networks": ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"],
+    # ---- 行为突变检测 ----
+    "mutation_conn_ratio": 10.0,           # 连接数突变倍数阈值
+    "mutation_conn_min": 100,              # 连接数突变的绝对最小值
+    "mutation_peer_ratio": 10.0,           # 对端数突变倍数阈值
+    "mutation_peer_min": 50,              # 对端数突变绝对最小值
+    "mutation_syn_ratio": 8.0,            # SYN 比例异常倍数
+    "mutation_syn_min": 100,              # SYN 比例异常绝对最小值
+}
+
+# ==================== 真实环境配置（降低误报率） ====================
+
+REALTIME_ANOMALY_CONFIG = {
+    **ANOMALY_CONFIG,
+    "conn_rate_threshold": 10.0,           # 连接速率异常倍数（3→10）
+    "port_scan_threshold": 500,            # 端口扫描阈值（50→500）
+    "port_scan_window_sec": 60,            # 窗口扩大到 60s
+    "brute_force_threshold": 50,           # 暴力破解阈值（10→50）
+    "brute_force_window_sec": 30,          # 窗口（5→30s）
+    "syn_flood_threshold": 5000,           # SYN Flood 阈值（100→5000）
+    "syn_flood_window_sec": 5,             # 窗口（1→5s）
+    "bandwidth_anomaly_threshold": 30.0,   # 带宽异常倍数（5→30x）
+    "enable_noise_reduction": True,
+    "noise_min_severity": 4,              # 只显示高危及以上（3→4）
+    # ---- 行为突变检测 ----
+    "mutation_conn_ratio": 20.0,           # 连接数突变倍数（10→20）
+    "mutation_conn_min": 200,              # 连接数突变最小绝对值
+    "mutation_peer_ratio": 20.0,           # 对端数突变倍数（10→20）
+    "mutation_peer_min": 100,             # 对端数突变最小绝对值
+    "mutation_syn_ratio": 15.0,           # SYN 比例异常倍数（8→15）
+    "mutation_syn_min": 300,              # SYN 比例异常最小绝对值
 }
 
 

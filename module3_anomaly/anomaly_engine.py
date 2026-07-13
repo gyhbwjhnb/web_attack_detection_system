@@ -509,7 +509,7 @@ class AnomalyEngine(IAnomalyEngine):
             baseline_conn_rate = baseline.conn_avg_per_min
             conn_ratio = recent_conn_rate / max(baseline_conn_rate, 0.01)
 
-            if conn_ratio > 5.0 and recent_conn > 20:
+            if conn_ratio > self._config.get("mutation_conn_ratio", 5.0) and recent_conn > self._config.get("mutation_conn_min", 20):
                 alerts.append(self._make_alert(
                     record, "unknown_anomaly", AlertSeverity.HIGH,
                     f"连接数突变: {record.src.ip} 近期 {recent_conn_rate:.1f}次/分钟，基线 {baseline_conn_rate:.1f}次/分钟 (×{conn_ratio:.1f})",
@@ -522,7 +522,7 @@ class AnomalyEngine(IAnomalyEngine):
             baseline_peers = max(len(baseline.internal_peers), 1)
             peer_ratio = recent_peers / baseline_peers
 
-            if peer_ratio > 5.0 and recent_peers > 15:
+            if peer_ratio > self._config.get("mutation_peer_ratio", 5.0) and recent_peers > self._config.get("mutation_peer_min", 15):
                 alerts.append(self._make_alert(
                     record, "unknown_anomaly", AlertSeverity.MEDIUM,
                     f"对端数突变: {record.src.ip} 近期通信 {recent_peers} 个对端，基线约 {baseline_peers} 个 (×{peer_ratio:.1f})",
@@ -535,7 +535,7 @@ class AnomalyEngine(IAnomalyEngine):
             syn_in_window = self._count_recent(self._syn_timestamps, now, self._recent_window)
             syn_rate = syn_in_window / max(self._recent_window / 60.0, 1)  # SYN/分钟
             normal_syn_rate = baseline_conn_rate * 0.3  # 经验值：正常 SYN 约占 30%
-            if syn_rate > normal_syn_rate * 3 and syn_in_window > 30:
+            if syn_rate > normal_syn_rate * self._config.get("mutation_syn_ratio", 3.0) and syn_in_window > self._config.get("mutation_syn_min", 30):
                 alerts.append(self._make_alert(
                     record, "ddos", AlertSeverity.MEDIUM,
                     f"SYN比例异常: {record.src.ip} 近期 SYN {syn_rate:.1f}/分钟 (正常约{normal_syn_rate:.1f})",
