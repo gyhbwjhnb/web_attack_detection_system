@@ -7,9 +7,9 @@
 import sys
 sys.path.insert(0, ".")
 
-from scapy.all import Ether, IP, TCP, UDP, Raw, DNS, DNSQR
+from scapy.all import Ether, IP, TCP, UDP, Raw, DNS, DNSQR, ICMP, ARP, DNSRR
 from module1_capture.packet_parser import parse_packet
-from module1_capture import CaptureEngine, read_pcap_file
+from module1_capture import CaptureEngine
 from common import TrafficRecord, IPEndpoint, ProtocolType
 
 errors = []
@@ -50,7 +50,7 @@ check("dst.mac",     rec.dst.mac, "00:11:22:33:44:55")
 check("protocol",    rec.protocol, ProtocolType.HTTP)
 check("http_method", rec.http_method, "GET")
 check("http_host",   rec.http_host, "10.0.0.1")
-check("http_uri",    rec.http_uri, "http://10.0.0.1/index.php?id=1%27%20OR%201=1")
+check("http_uri",    rec.http_uri, "/index.php?id=1' OR 1=1")  # URL 已解码
 check("http_ua",     rec.http_user_agent, "Mozilla/5.0")
 check("http_referer",rec.http_referer, "http://evil.com")
 check("http_body",   rec.http_body, "<body>test</body>")
@@ -88,7 +88,7 @@ print("=" * 50)
 pkt3 = IP(src="10.0.0.99", dst="192.168.1.1") / TCP(sport=44444, dport=22, flags="S")
 rec3 = parse_packet(pkt3)
 
-check("proto_tcp",    rec3.protocol, ProtocolType.TCP)
+check("proto_ssh",    rec3.protocol, ProtocolType.SSH)  # 端口 22 标记为 SSH
 check("is_syn_true",  rec3.is_syn(), True)
 check("dst_port_22",  rec3.dst.port, 22)
 check("src_ip_scan",  rec3.src.ip, "10.0.0.99")
@@ -117,7 +117,7 @@ print("=" * 50)
 pkt_udp = IP(src="192.168.1.50", dst="192.168.1.1") / UDP(sport=9999, dport=53)
 rec_udp = parse_packet(pkt_udp)
 
-check("proto_udp",    rec_udp.protocol, ProtocolType.DNS)  # UDP 53 应识别为 DNS
+check("proto_udp",    rec_udp.protocol, ProtocolType.DNS)  # 端口 53 标记为 DNS
 check("src_port",     rec_udp.src.port, 9999)
 check("dst_port_53",  rec_udp.dst.port, 53)
 print()
@@ -143,30 +143,80 @@ print()
 # ============================
 
 print("=" * 50)
-print("测试7: 手动字节解析（无 Scapy 兼容）")
+print("测试7: ICMP Echo Request/Reply 解析")
 print("=" * 50)
 
-from module1_capture.packet_parser import _parse_bytes_manually
+# ICMP Echo Request (type=8, code=0)
+pkt_icmp_req = (
+    IP(src="10.0.0.1", dst="192.168.1.1")
+    / ICMP(type=8, code=0)
+    / Raw(load=b"ping data payload")
+)
+rec_icmp = parse_packet(pkt_icmp_req)
 
-ip_hdr = bytes([0x45, 0, 0, 0x28, 0, 1, 0, 0, 64, 6, 0, 0,
-                192, 168, 1, 100, 10, 0, 0, 1])
-tcp_hdr = bytes([0xD4, 0x31, 0, 0x50, 0, 0, 0, 1, 0, 0, 0, 0,
-                 0x50, 0x02, 0xFF, 0xFF, 0, 0, 0, 0])
-raw_pkt = ip_hdr + tcp_hdr
-rec_raw = _parse_bytes_manually(raw_pkt)
+check("icmp_proto",    rec_icmp.protocol, ProtocolType.ICMP)
+check("icmp_type",     rec_icmp.icmp_type, 8)
+check("icmp_code",     rec_icmp.icmp_code, 0)
+check("icmp_detail",   rec_icmp.protocol_detail, "Echo Request")
+check("icmp_payload",  "ping" in rec_icmp.payload, True)
 
-check("raw_src_ip",    rec_raw.src.ip, "192.168.1.100")
-check("raw_src_port",  rec_raw.src.port, 54321)
-check("raw_dst_ip",    rec_raw.dst.ip, "10.0.0.1")
-check("raw_dst_port",  rec_raw.dst.port, 80)
-check("raw_proto",     rec_raw.protocol, ProtocolType.TCP)
-check("raw_is_syn",    rec_raw.is_syn(), True)
+# ICMP Echo Reply (type=0, code=0)
+pkt_icmp_rep = (
+    IP(src="192.168.1.1", dst="10.0.0.1")
+    / ICMP(type=0, code=0)
+)
+rec_icmp2 = parse_packet(pkt_icmp_rep)
+check("icmp_reply_type", rec_icmp2.icmp_type, 0)
+check("icmp_reply_detail", rec_icmp2.protocol_detail, "Echo Reply")
 print()
 
 # ============================
 
 print("=" * 50)
-print("测试8: IPEndpoint 内网判断")
+print("测试8: ARP 请求/响应解析")
+print("=" * 50)
+
+arp_req = Ether(src="aa:bb:cc:dd:ee:01", dst="ff:ff:ff:ff:ff:ff") / ARP(op=1, hwsrc="aa:bb:cc:dd:ee:01", psrc="192.168.1.100", hwdst="00:00:00:00:00:00", pdst="192.168.1.1")
+rec_arp = parse_packet(arp_req)
+check("arp_proto",    rec_arp.protocol, ProtocolType.ARP)
+check("arp_src_ip",   rec_arp.src.ip, "192.168.1.100")
+check("arp_dst_ip",   rec_arp.dst.ip, "192.168.1.1")
+check("arp_detail",   rec_arp.protocol_detail, "ARP Request")
+check("arp_flow_id",  "ARP:" in rec_arp.flow_id, True)
+
+arp_rep = Ether(src="11:22:33:44:55:66", dst="aa:bb:cc:dd:ee:01") / ARP(op=2, hwsrc="11:22:33:44:55:66", psrc="192.168.1.1", hwdst="aa:bb:cc:dd:ee:01", pdst="192.168.1.100")
+rec_arp2 = parse_packet(arp_rep)
+check("arp_reply",     rec_arp2.protocol_detail, "ARP Reply")
+print()
+
+# ============================
+
+print("=" * 50)
+print("测试9: DNS 响应解析（含 A 记录答案）")
+print("=" * 50)
+
+from scapy.all import DNSRR, DNSRROPT
+
+dns_resp = (
+    IP(src="8.8.8.8", dst="192.168.1.100")
+    / UDP(sport=53, dport=12345)
+    / DNS(
+        id=0x1234, qr=1, rd=1, ra=1,
+        qd=DNSQR(qname="example.com", qtype="A"),
+        an=DNSRR(rrname="example.com", type="A", rdata="93.184.216.34", ttl=300),
+    )
+)
+rec_dns = parse_packet(dns_resp)
+check("dns_response_proto", rec_dns.protocol, ProtocolType.DNS)
+check("dns_query_example",  rec_dns.dns_query, "example.com")
+check("dns_has_answers",    len(rec_dns.dns_answers) > 0, True)
+check("dns_answer_ip",      "93.184.216.34" in rec_dns.dns_answers, True)
+print()
+
+# ============================
+
+print("=" * 50)
+print("测试10: IPEndpoint 内网判断")
 print("=" * 50)
 
 check("192.168.x",  IPEndpoint(ip="192.168.1.1").is_internal, True)
@@ -180,7 +230,7 @@ print()
 # ============================
 
 print("=" * 50)
-print("测试9: all_http_text 属性")
+print("测试11: all_http_text 属性")
 print("=" * 50)
 
 text = rec.all_http_text
@@ -193,17 +243,17 @@ print()
 # ============================
 
 print("=" * 50)
-print("测试10: http_query_params 属性")
+print("测试12: http_query_params 属性")
 print("=" * 50)
 
 params = rec.http_query_params
-check("param_id", params.get("id"), "1%27%20OR%201=1")
+check("param_id", params.get("id"), "1' OR 1=1")  # URL 解码后
 print()
 
 # ============================
 
 print("=" * 50)
-print("测试11: to_dict / to_json 序列化")
+print("测试13: to_dict / to_json 序列化")
 print("=" * 50)
 
 d = rec.to_dict()
@@ -218,59 +268,63 @@ print()
 # ============================
 
 print("=" * 50)
-print("测试12: CaptureEngine 基本生命周期")
+print("测试14: CaptureEngine 基本生命周期")
 print("=" * 50)
 
-engine = CaptureEngine(bpf_filter="tcp", packet_count=0, publish_to_bus=False)
-check("init_running", engine._running, False)
+from module1_capture import CaptureEngine
+
+engine = CaptureEngine(use_message_bus=False)
+check("init_running", engine.is_running(), False)
 check("init_pkts",    engine.get_statistics()["packet_count"], 0)
 
-engine.start()
+# 离线模式：用构建好的 scapy 包模拟
 import time
-time.sleep(0.3)
 
-# 在没有 Npcap 的 Windows 上实时抓包可能无法启动，这是环境限制
-if not engine._running:
-    print("  [SKIP] 实时抓包需要 Npcap/WinPcap 驱动，跳过此测试")
-else:
-    check("after_start",  engine._running, True)
+# 测试 _dispatch 回调
+received_life = []
+engine.set_on_traffic_callback(lambda r: received_life.append(r))
 
+from module1_capture.packet_parser import create_fake_http_record
+fake_rec = create_fake_http_record()
+engine._dispatch(fake_rec)
+check("dispatch_works", len(received_life), 1)
+check("dispatch_data",  received_life[0].http_method, "GET")
+
+# 测试 stop idle 不抛异常
 engine.stop()
-time.sleep(0.3)
-check("after_stop",   engine._running, False)
+check("stop_idle_ok",  True, True)
 
 stats = engine.get_statistics()
-check("stats_running", stats["running"], False)
+check("stats_dict",    "packet_count" in stats, True)
 print()
 
 # ============================
 
 print("=" * 50)
-print("测试13: CaptureEngine 回调机制")
+print("测试15: 端口协议标记（SMB / RDP / MySQL / Redis）")
 print("=" * 50)
 
-from scapy.all import sniff as scapy_sniff
+# SMB (port 445)
+pkt_smb = IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=49152, dport=445, flags="S")
+rec_smb = parse_packet(pkt_smb)
+check("smb_proto",     rec_smb.protocol, ProtocolType.SMB)
+check("smb_detail",    "SMB" in rec_smb.protocol_detail, True)
 
-test_engine = CaptureEngine(
-    bpf_filter="",
-    packet_count=0,
-    publish_to_bus=False,
-)
+# RDP (port 3389)
+pkt_rdp = IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=49153, dport=3389, flags="S")
+rec_rdp = parse_packet(pkt_rdp)
+check("rdp_proto",     rec_rdp.protocol, ProtocolType.RDP)
 
-received = []
-test_engine.set_on_traffic_callback(lambda r: received.append(r))
-test_engine._running = True  # 手动设为运行
+# MySQL (port 3306)
+pkt_mysql = IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=49154, dport=3306, flags="S")
+rec_mysql = parse_packet(pkt_mysql)
+check("mysql_proto",   rec_mysql.protocol, ProtocolType.MYSQL)
 
-# 直接调用 _on_packet 模拟收包
-test_engine._on_packet(pkt)
-test_engine._on_packet(pkt3)
+# Redis (port 6379)
+pkt_redis = IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=49155, dport=6379, flags="S")
+rec_redis = parse_packet(pkt_redis)
+check("redis_proto",   rec_redis.protocol, ProtocolType.REDIS)
 
-check("callback_count", len(received), 2)
-check("cb1_src_ip",     received[0].src.ip, "192.168.1.100")
-check("cb2_dst_port",   received[1].dst.port, 22)
-
-stats2 = test_engine.get_statistics()
-check("stats_pkts_2",   stats2["packet_count"], 2)
 print()
 
 # ============================

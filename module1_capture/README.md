@@ -77,8 +77,13 @@ module1_capture/
 │  原始 scapy 包                                                          │
 │       │                                                                 │
 │       ▼                                                                 │
+│  ┌─────────┐  ARP?                                                      │
+│  │ 检查 ARP ├─── 是 ──→ _parse_arp() → src.ip/dst.ip/mac + ARP Request/Reply│
+│  └────┬────┘                                                            │
+│       │ 否                                                              │
+│       ▼                                                                 │
 │  ┌─────────┐    有IP层?                                                  │
-│  │ 检查 IP  ├─── 否 ──→ 返回 None（ARP等非IP包跳过）                       │
+│  │ 检查 IP  ├─── 否 ──→ 返回 None（PPPoE等非IP非ARP包跳过）                │
 │  └────┬────┘                                                            │
 │       │ 是                                                              │
 │       ▼                                                                 │
@@ -101,7 +106,7 @@ module1_capture/
 │  │ 解析传输层    │  _parse_transport()                                    │
 │  │              │  → TCP: src.port, dst.port, flags(如0x018=PSH+ACK)    │
 │  │              │  → UDP: src.port, dst.port                             │
-│  │              │  → ICMP: 仅标记协议类型                                 │
+│  │              │  → ICMP: type(8=Echo/0=Reply), code, protocol_detail   │
 │  └──────┬───────┘                                                       │
 │         ▼                                                               │
 │  ┌──────────────┐                                                       │
@@ -111,13 +116,24 @@ module1_capture/
 │  ┌──────────────────────┐                                                │
 │  │ 检测应用层协议        │  _detect_application_protocol()                  │
 │  │                      │                                                │
-│  │  检查载荷内容 ──┬── HTTP?  ──→ _parse_http(): 提取方法/URI/Host/Body   │
-│  │                │                                                      │
-│  │                ├── 端口53? ──→ _parse_dns():  提取查询域名/类型        │
-│  │                │                                                      │
-│  │                ├── TLS标记?──→ _detect_tls(): 提取版本号              │
-│  │                │                                                      │
-│  │                └── 22/21/25 端口 ──→ SSH/FTP/SMTP 端口标记             │
+│  │  检查内容/端口 ──┬── HTTP?     ──→ _parse_http(): 方法/URI/Host/Body   │
+│  │                 │                                                      │
+│  │                 ├── 端口53?    ──→ _parse_dns(): 域名/类型/响应答案     │
+│  │                 │                 （支持 scapy DNS 层和原始字节）        │
+│  │                 │                                                      │
+│  │                 ├── TLS标记?   ──→ _detect_tls(): 版本号 + SNI 域名    │
+│  │                 │                                                      │
+│  │                 ├── 端口22/21/25 ─→ SSH/FTP/SMTP 端口标记              │
+│  │                 │                                                      │
+│  │                 ├── 端口445/139  ─→ SMB（永恒之蓝等漏洞）               │
+│  │                 │                                                      │
+│  │                 ├── 端口3389     ─→ RDP 远程桌面                       │
+│  │                 │                                                      │
+│  │                 ├── 端口3306     ─→ MySQL 数据库                       │
+│  │                 │                                                      │
+│  │                 ├── 端口6379     ─→ Redis                               │
+│  │                 │                                                      │
+│  │                 └── 端口27017    ─→ MongoDB                             │
 │  └──────────────────────┘                                                │
 │         ▼                                                               │
 │  ┌──────────────┐                                                       │
@@ -270,12 +286,24 @@ def _handle_packet(self, packet):
 ```
 get_working_ifaces()
     │
-    ├── 遍历可用网卡
-    │    ├── 优先选有 IP、非回环、非 lo 的网卡
-    │    └── 兜底：返回第一个
+    ├── 分级筛选（按优先级降序）
+    │    ├── 0=物理有线（Ethernet/以太网）且有有效 IP
+    │    ├── 1=物理无线（Wi-Fi/WLAN）且有有效 IP
+    │    ├── 2=其他物理网卡且有有效 IP
+    │    ├── 3=虚拟网卡且有 IP（降级选择）
+    │    └── 4=无 IP / 回环（兜底）
     │
-    └── 异常/无网卡 → 返回 None
+    ├── 自动过滤的虚拟适配器
+    │    ├── VMware / VirtualBox / Hyper-V
+    │    ├── Docker / WSL / Npcap Loopback
+    │    └── Bluetooth 网络适配器
+    │
+    └── 全部失败 → 列出所有可用接口帮助用户手动选择
 ```
+
+**过滤效果（Windows 实测）：**
+可用接口 11 个（含 3 WAN Miniport、2 VMware、1 Hyper-V、1 Npcap Loopback），
+自动选择从第 6 位（WLAN 无线网卡）开始，绕过前 6 个虚拟/回环接口。
 
 ### 4.2 `packet_parser.py` — 协议解析
 
@@ -331,25 +359,85 @@ record.http_uri = unquote(parts[1])
 
 ```python
 def _parse_dns(record: TrafficRecord):
-    # 直接从原始字节 payload_raw 中解析
+    # 支持两种方式：
+    #   1. 原始字节解析（从 payload_raw 逐字节解析域名 + 响应记录）
+    #   2. scapy DNS 层提取（从 packet["DNS"] 直接读取）
 
-    # DNS 头部 12 字节: ID(2) + flags(2) + qdcount(2) + ...
-    qdcount = (raw[4] << 8) | raw[5]  # 查询数量
+    # DNS 头部: ID(2) + flags(2) + qdcount(2) + ancount(2) + ...
+    qdcount = (raw[4] << 8) | raw[5]
+    ancount = (raw[6] << 8) | raw[7]
 
-    # 从第 13 字节开始解析域名
+    # ---- 查询部分：解析域名 ----                          
     # 域名编码: 3www7example3com0 → www.example.com
-    offset = 12
-    while offset < len(raw):
-        length = raw[offset]
-        if length == 0: break          # 结束符
-        if length & 0xC0:              # 压缩指针
-            offset += 2; break
-        part = raw[offset+1:offset+1+length]
-        domain_parts.append(part.decode("ascii"))
-        offset += length + 1
+    # 支持压缩指针（0xC0 标记）
 
-    record.dns_query = ".".join(domain_parts)
+    # ---- 响应部分：解析 A/AAAA/CNAME/TXT 记录 ----
+    if is_response and ancount > 0:
+        for _ in range(ancount):
+            rtype = (raw[offset] << 8) | raw[offset + 1]
+            if rtype == 1:   # A 记录 → 提取 IPv4
+            elif rtype == 28: # AAAA 记录 → 提取 IPv6
+            elif rtype == 5:  # CNAME 记录 → 提取别名
+            elif rtype == 16: # TXT 记录 → 提取文本
 ```
+
+**新增功能：**
+- 支持 scapy DNS 层直接提取（`_parse_dns_from_scapy`），无 Raw 层也能解析
+- 支持 DNS 响应答案解析（A/AAAA/CNAME 记录）
+- 支持 DNS 压缩指针展开（`_expand_dns_name`）
+
+#### TLS 解析详解（含 SNI 提取）
+
+```python
+def _detect_tls(record: TrafficRecord) -> bool:
+    raw = record.payload_raw
+    # TLS 记录层: ContentType(1) + Version(2) + Length(2)
+    if raw[0] == 0x16:  # Handshake
+        record.tls_version = ver_map[(raw[1], raw[2])]  # TLS 1.x
+
+        # ---- SNI 提取（从 ClientHello 解析） ----
+        # 跳过固定字段 → 遍历 Extensions → type=0x0000(server_name)
+        # 读取 ServerName（即目标域名）
+        if raw[5] == 0x01:  # ClientHello
+            record.tls_sni = "example.com"  # 实际提取结果
+```
+
+**SNI 有什么用？** HTTPS 加密了 HTTP 内容，但 ClientHello 中的 SNI 是明文的。
+模块二可以通过 SNI 判断是否连接到了已知恶意 C2 域名，即使流量被 TLS 加密。
+
+#### ICMP 解析详解
+
+```python
+# _parse_transport() 中:
+if packet.haslayer("ICMP"):
+    icmp = packet["ICMP"]
+    record.icmp_type = int(icmp.type)   # 8=Echo Request, 0=Echo Reply
+    record.icmp_code = int(icmp.code)   # 0=No Code
+    record.protocol_detail = type_desc[icmp_type]  # "Echo Request"
+```
+
+**ICMP 的攻击检测价值：**
+- `icmp_type=8` + 短时间内大量出现 → Ping Sweep（探测存活主机）
+- `icmp_type=8` + 载荷非空且异常大 → ICMP 隧道（隐蔽通信）
+- ICMP 载荷也一并提取到 `payload` 字段中，供模块二检测
+
+#### ARP 解析详解
+
+```python
+def _parse_arp(packet) -> TrafficRecord:
+    """ARP 协议独立解析（不经过 IP/TCP/UDP 管线）"""
+    arp = packet["ARP"]
+    record.protocol = ProtocolType.ARP
+    record.protocol_detail = "ARP Request" if op == 1 else "ARP Reply"
+    record.src.ip = arp.psrc    # 发送方 IP
+    record.dst.ip = arp.pdst    # 目标 IP
+    record.src.mac = arp.hwsrc  # 发送方 MAC
+    record.flow_id = f"ARP:{record.src.ip}->{record.dst.ip}"
+```
+
+**ARP 的攻击检测价值：**
+- 同一 IP 的 MAC 地址频繁变化 → ARP 欺骗（中间人攻击）
+- 短时间内大量 ARP Request 扫描不同 IP → ARP 扫描（内网探测）
 
 #### `create_fake_http_record()` — 测试辅助函数
 
@@ -382,14 +470,20 @@ def create_fake_http_record(method="GET", uri="/index.php?id=1",
 
 ### 4.3 常见协议的特征码速查
 
-| 协议 | 端口 | 载荷特征 | 解析依据 |
-|------|------|---------|---------|
-| HTTP 请求 | 任意 | 以 `GET/POST/PUT...` 开头 | `payload.split()[0] in HTTP_METHODS` |
-| HTTP 响应 | 任意 | 以 `HTTP/` 开头 | `payload.startswith("HTTP/")` |
-| DNS | 53 | DNS 头部格式 | 原始字节逐字节解析域名 |
-| TLS | 443(常见) | 首字节 `0x16`(Handshake) | `raw[0] == 0x16` |
-| SSH | 22 | 端口标记 | `dst.port == 22` |
-| FTP | 21 | 端口标记 | `dst.port == 21` |
+| 协议 | 端口 | 检测方式 | 攻击检测用途 |
+|------|------|---------|------------|
+| HTTP 请求 | 任意 | 内容: `GET/POST/PUT...` 开头 | SQL注入、XSS、命令注入 |
+| HTTP 响应 | 任意 | 内容: `HTTP/` 开头 | 服务器信息泄露 |
+| DNS | 53 | 端口 + 内容 | 恶意域名、DNS隧道、DNS放大 |
+| TLS | 443(常见) | 内容: 首字节 `0x16` | 提取SNI域名、TLS版本指纹 |
+| ICMP | - | 协议类型 | Ping扫描(type=8)、ICMP隧道 |
+| ARP | - | 链路层协议 | ARP欺骗、ARP扫描 |
+| SSH | 22 | 端口标记 | 爆破检测 |
+| SMB | 445/139 | 端口标记 | 永恒之蓝等漏洞利用 |
+| RDP | 3389 | 端口标记 | 远程桌面爆破 |
+| MySQL | 3306 | 端口标记 | 数据库攻击 |
+| Redis | 6379 | 端口标记 | 未授权访问 |
+| MongoDB | 27017 | 端口标记 | 数据库入侵 |
 
 ---
 
@@ -514,10 +608,11 @@ engine.stop()
 ## 六、TrafficRecord 字段速查
 
 ```python
+# 基础信息
 record.id              # str  唯一标识（12位hex）
 record.timestamp       # float  时间戳
-record.protocol        # ProtocolType  TCP/UDP/HTTP/DNS/TLS/ICMP...
-record.protocol_detail # str  协议详情如 "HTTP/1.1"
+record.protocol        # ProtocolType  TCP/UDP/HTTP/DNS/TLS/ICMP/ARP...
+record.protocol_detail # str  协议详情如 "HTTP/1.1", "TLS 1.2"
 record.src.ip          # str  源IP地址
 record.src.port        # int  源端口
 record.dst.ip          # str  目的IP地址
@@ -525,7 +620,9 @@ record.dst.port        # int  目的端口
 record.src.mac         # str  源MAC（在线抓包时捕获）
 record.dst.mac         # str  目的MAC
 record.flags           # int  TCP标志位（0x02=SYN, 0x10=ACK, 0x18=PSH+ACK）
-record.flow_id         # str  五元组流ID
+record.seq_num         # int  TCP序列号
+record.ack_num         # int  TCP确认号
+record.flow_id         # str  五元组流ID "src.ip:port-dst.ip:port-TCP"
 record.payload         # str  文本载荷（UTF-8解码）
 record.payload_raw     # bytes  原始字节载荷
 record.payload_size    # int  载荷长度
@@ -537,15 +634,29 @@ record.http_host       # str  Host头
 record.http_headers    # dict  所有HTTP头
 record.http_body       # str  请求/响应体
 record.http_status_code # int  响应状态码
-record.http_referer    # str  Referer头
+record.http_referer    # str  Referer头（已URL解码）
 record.http_user_agent # str  User-Agent头
 
 # DNS 字段（仅 DNS 协议时有值）
-record.dns_query       # str  查询域名
+record.dns_query       # str  查询域名（如 "evil.c2.com"）
 record.dns_query_type  # str  A/AAAA/MX/TXT...
+record.dns_answers     # list  DNS响应答案IP/CNAME列表
 
 # TLS 字段（仅 TLS 协议时有值）
 record.tls_version     # str  TLS 1.2 / TLS 1.3
+record.tls_sni         # str  SNI域名（ClientHello 明文）
+
+# ICMP 字段（仅 ICMP 协议时有值）
+record.icmp_type       # int  类型（8=Echo Request, 0=Echo Reply）
+record.icmp_code       # int  代码（0=No Code）
+
+# 流信息
+record.flow_bytes_sent     # int  流发送字节数
+record.flow_bytes_received # int  流接收字节数
+record.flow_packet_count   # int  流包含包数
+
+# 元数据
+record.tags            # list  标签（如 ["arp"]）
 ```
 
 ---
@@ -557,7 +668,10 @@ record.tls_version     # str  TLS 1.2 / TLS 1.3
 | 模块一需要哪些 Python 包？ | `scapy`（抓包/解析PCAP），`pytest`（测试） |
 | 一定要安装 Npcap 吗？ | 只有**在线抓包**需要。纯离线 PCAP 解析和模拟数据不需要 |
 | 为什么抓包要管理员权限？ | 原始套接字操作需要系统级权限。Windows 需管理员，Linux 需 sudo |
-| 解析结果为零怎么办？ | 检查 PCAP 中是否包含 IP 包（ARP/PPPoE 等非 IP 包会被 `parse_packet` 跳过） |
-| 能解析 HTTPS 内容吗？ | 不能。HTTPS 是加密的，模块一只检测到 TLS 握手，无法解密应用层数据 |
+| 解析结果为零怎么办？ | 检查 PCAP 是否包含 IP 包（PPPoE 等非 IP 非 ARP 包会被跳过）。ARP 包现已被独立解析，不会被跳过 |
+| ARP 包现在能解析了吗？ | 可以。`parse_packet()` 在检查 IP 层之前会先检查 ARP 层，ARP Request/Reply 会被正确解析为 `ProtocolType.ARP` |
+| 能解析 HTTPS 内容吗？ | 不能解密。但模块一可提取 TLS 版本号和 SNI 域名（ClientHello 明文），供模块二判断恶意 C2 连接 |
+| ICMP 解析了什么？ | `icmp_type`（8=Echo/0=Reply）、`icmp_code`，支持 Ping 扫描和 ICMP 隧道检测 |
 | 如何关闭 MessageBus？ | `CaptureEngine(use_message_bus=False)` |
 | `to_dict()` 报错 FlagValue？ | 已修复：scapy 的 TCP flags 类型在序列化时自动转为 int |
+| 测试怎么运行？ | 自测脚本: `python tests/test_module1.py`（76 项测试，含 HTTP/DNS/ICMP/ARP 等）|
