@@ -147,7 +147,7 @@ def _parse_transport(packet, record: TrafficRecord):
             record.src.port = tcp.sport
             record.dst.port = tcp.dport
             record.protocol = ProtocolType.TCP
-            record.flags = tcp.flags
+            record.flags = int(tcp.flags) if not isinstance(tcp.flags, int) else tcp.flags
             record.seq_num = tcp.seq
             record.ack_num = tcp.ack
 
