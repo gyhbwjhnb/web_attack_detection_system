@@ -49,19 +49,24 @@ def parse_packet(packet) -> Optional[TrafficRecord]:
         TrafficRecord 实例，解析失败返回 None
 
     流程:
-        1. 检查是否有 IP 层（无 IP 层的包跳过，如 ARP）
-        2. 初始化 TrafficRecord
-        3. 逐层解析: Ether → IP → TCP/UDP/ICMP → HTTP/DNS/TLS
-        4. 提取载荷
+        1. 先检查 ARP（二层协议，独立处理）
+        2. 再检查 IP 层（无 IP 层的包跳过）
+        3. 初始化 TrafficRecord
+        4. 逐层解析: Ether → IP → TCP/UDP/ICMP → HTTP/DNS/TLS
+        5. 提取载荷
     """
     try:
+        # ---- 先检查 ARP（独立于 IP 的链路层协议） ----
+        if packet.haslayer("ARP"):
+            return _parse_arp(packet)
+
         # ---- 必须有 IP 层 ----
         if packet.haslayer("IP"):
             ip_layer = packet["IP"]
         elif packet.haslayer("IPv6"):
             ip_layer = packet["IPv6"]
         else:
-            # 非 IP 包（ARP、PPPoE 等），跳过
+            # 非 IP 包（PPPoE 等），跳过
             return None
 
         record = TrafficRecord()
@@ -75,7 +80,7 @@ def parse_packet(packet) -> Optional[TrafficRecord]:
         # 在检测应用层协议前，记录传输层协议（用于流ID）
         transport_layer_protocol = record.protocol
 
-        _detect_application_protocol(record)
+        _detect_application_protocol(record, packet)
 
         # ---- 包长度 ----
         record.payload_size = len(record.payload_raw)
@@ -93,6 +98,44 @@ def parse_packet(packet) -> Optional[TrafficRecord]:
 
 
 # ==================== 各层解析函数 ====================
+
+
+def _parse_arp(packet) -> Optional[TrafficRecord]:
+    """解析 ARP 协议（请求/响应），用于 ARP 欺骗/扫描检测"""
+    try:
+        arp = packet["ARP"]
+        record = TrafficRecord()
+        record.protocol = ProtocolType.ARP
+
+        # MAC
+        if packet.haslayer("Ether"):
+            record.src.mac = packet["Ether"].src
+            record.dst.mac = packet["Ether"].dst
+
+        # ARP 字段
+        record.src.ip = arp.psrc
+        record.dst.ip = arp.pdst
+        record.src.mac = arp.hwsrc if hasattr(arp, 'hwsrc') and arp.hwsrc else record.src.mac
+        record.dst.mac = arp.hwdst if hasattr(arp, 'hwdst') and arp.hwdst else record.dst.mac
+
+        op = int(arp.op) if hasattr(arp.op, '__int__') else arp.op
+        if op == 1:
+            record.protocol_detail = "ARP Request"
+            record.flags = 1  # request
+        elif op == 2:
+            record.protocol_detail = "ARP Reply"
+            record.flags = 2  # reply
+
+        record.flow_id = f"ARP:{record.src.ip}->{record.dst.ip}"
+        record.payload_size = 28  # ARP 固定头长度
+
+        # tags: 标记可疑 ARP
+        record.tags.append("arp")
+
+        return record
+    except Exception as e:
+        logger.debug(f"ARP 解析异常: {e}")
+        return None
 
 
 def _parse_ethernet(packet, record: TrafficRecord):
@@ -159,6 +202,18 @@ def _parse_transport(packet, record: TrafficRecord):
 
         elif packet.haslayer("ICMP"):
             record.protocol = ProtocolType.ICMP
+            try:
+                icmp = packet["ICMP"]
+                record.icmp_type = int(icmp.type) if hasattr(icmp.type, '__int__') else icmp.type
+                record.icmp_code = int(icmp.code) if hasattr(icmp.code, '__int__') else icmp.code
+                # 添加可读的 ICMP 类型描述
+                type_desc = {
+                    0: "Echo Reply", 3: "Dest Unreachable", 4: "Source Quench",
+                    5: "Redirect", 8: "Echo Request", 11: "Time Exceeded",
+                }
+                record.protocol_detail = type_desc.get(record.icmp_type, f"Type{record.icmp_type}")
+            except Exception:
+                pass
 
     except Exception as e:
         logger.debug(f"传输层解析异常: {e}")
@@ -169,18 +224,18 @@ def _parse_payload(packet, record: TrafficRecord):
     提取应用层载荷。
 
     策略:
-      1. TCP: 取 Raw 层（如果有）
-      2. UDP: 取 Raw 层
+      1. TCP/UDP: 取 Raw 层（如果有）
+      2. ICMP: 取 ICMP 载荷（用于检测 ICMP 隧道）
       3. 限制最大载荷长度，防止内存溢出
     """
     MAX_PAYLOAD = 65536  # 64KB 上限
 
     try:
+        # ---- TCP/UDP Raw 载荷 ----
         if packet.haslayer("Raw"):
             raw = packet["Raw"].load
             if isinstance(raw, (bytes, bytearray)):
                 record.payload_raw = raw[:MAX_PAYLOAD]
-                # 尝试 UTF-8 解码
                 try:
                     record.payload = raw.decode("utf-8", errors="replace")
                 except Exception:
@@ -188,6 +243,19 @@ def _parse_payload(packet, record: TrafficRecord):
             else:
                 record.payload = str(raw)[:MAX_PAYLOAD]
                 record.payload_raw = record.payload.encode("utf-8", errors="replace")
+
+        # ---- ICMP 载荷（ICMP 隧道检测用） ----
+        if record.protocol == ProtocolType.ICMP and packet.haslayer("ICMP"):
+            try:
+                icmp = packet["ICMP"]
+                if hasattr(icmp, 'payload') and icmp.payload:
+                    raw = bytes(icmp.payload)
+                    if raw and len(raw) > 0:
+                        record.payload_raw = raw[:MAX_PAYLOAD]
+                        record.payload = raw.decode("utf-8", errors="replace")
+            except Exception:
+                pass
+
     except Exception as e:
         logger.debug(f"载荷提取异常: {e}")
 
@@ -195,43 +263,78 @@ def _parse_payload(packet, record: TrafficRecord):
 # ==================== 应用层协议检测 ====================
 
 
-def _detect_application_protocol(record: TrafficRecord):
-    """检测应用层协议（HTTP / DNS / TLS / SSH / FTP 等）"""
-    if not record.payload:
-        return
+def _detect_application_protocol(record: TrafficRecord, packet=None):
+    """检测应用层协议（HTTP / DNS / TLS / SMB / SSH 等）
 
+    Args:
+        record: TrafficRecord 实例
+        packet: 原始 scapy 包（可选，用于直接从 scapy 层提取信息如 DNS）
+    """
     payload = record.payload
-    payload_upper = payload[:1024].upper()
+    payload_upper = payload[:1024].upper() if payload else ""
 
-    # ---- HTTP 检测（基于请求行或响应行） ----
-    if _is_http(payload, payload_upper):
+    # ---- DNS 检测（优先于端口标记，支持无 Raw 层的 scapy DNS） ----
+    if record.dst.port == 53 or record.src.port == 53:
+        # 尝试从 scapy DNS 层提取（IP/UDP/DNS 结构无 Raw 层的情况）
+        if packet and packet.haslayer("DNS"):
+            _parse_dns_from_scapy(packet["DNS"], record)
+        else:
+            _parse_dns(record)
+        return  # DNS 检测到后直接返回，不走端口标记
+
+    # ---- HTTP 检测（基于内容） ----
+    if payload and _is_http(payload, payload_upper):
         _parse_http(record)
         return
 
-    # ---- DNS 检测 ----
-    if record.dst.port == 53 or record.src.port == 53:
-        _parse_dns(record)
-
-    # ---- SSH / FTP / SMTP / HTTPS 端口标记 ----
-    # （先做端口标记，TLS 内容检测可覆盖为更精确的协议类型）
-    if record.dst.port == 22 or record.src.port == 22:
-        record.protocol = ProtocolType.SSH
-        record.protocol_detail = "SSH"
-    elif record.dst.port == 21 or record.src.port == 21:
-        record.protocol = ProtocolType.FTP
-        record.protocol_detail = "FTP"
-    elif record.dst.port == 25 or record.src.port == 25:
-        record.protocol = ProtocolType.SMTP
-        record.protocol_detail = "SMTP"
+    # ---- 基于端口的协议标记（SSH/FTP/SMTP/攻击服务等） ----
+    _mark_port_protocol(record)
 
     # ---- TLS 检测（基于内容，优先级高于端口标记） ----
-    if _detect_tls(record):
+    if payload and _detect_tls(record):
         return
 
     # 端口的 HTTPS 猜测（仅在 TLS 内容检测未命中时使用）
     if record.dst.port == 443 or record.src.port == 443:
-        record.protocol = ProtocolType.HTTPS
-        record.protocol_detail = "HTTPS/TLS"
+        if record.protocol == ProtocolType.UNKNOWN or record.protocol == ProtocolType.TCP:
+            record.protocol = ProtocolType.HTTPS
+            record.protocol_detail = "HTTPS/TLS"
+    elif record.dst.port == 80 or record.src.port == 80:
+        if record.protocol == ProtocolType.UNKNOWN or record.protocol == ProtocolType.TCP:
+            record.protocol = ProtocolType.HTTP
+            record.protocol_detail = "HTTP"
+
+
+def _mark_port_protocol(record: TrafficRecord):
+    """基于端口的协议标记（适用于无载荷或无法内容识别的包）"""
+    port = record.dst.port or record.src.port
+
+    # 远程管理/漏洞利用类
+    if port in (22,):
+        record.protocol = ProtocolType.SSH
+        record.protocol_detail = "SSH"
+    elif port in (21,):
+        record.protocol = ProtocolType.FTP
+        record.protocol_detail = "FTP"
+    elif port in (25,):
+        record.protocol = ProtocolType.SMTP
+        record.protocol_detail = "SMTP"
+    elif port in (3389,):
+        record.protocol = ProtocolType.RDP
+        record.protocol_detail = "RDP"
+    elif port in (445, 139):
+        record.protocol = ProtocolType.SMB
+        record.protocol_detail = f"SMB (port {port})"
+    # 数据库类
+    elif port in (3306, 3307):
+        record.protocol = ProtocolType.MYSQL
+        record.protocol_detail = "MySQL"
+    elif port in (6379, 6380):
+        record.protocol = ProtocolType.REDIS
+        record.protocol_detail = "Redis"
+    elif port in (27017, 27018):
+        record.protocol = ProtocolType.MONGODB
+        record.protocol_detail = "MongoDB"
 
 
 # ==================== HTTP 解析 ====================
@@ -320,20 +423,24 @@ def _parse_http(record: TrafficRecord):
 
 
 def _parse_dns(record: TrafficRecord):
-    """浅解析 DNS 协议，提取查询域名"""
+    """解析 DNS 协议，提取查询域名和响应资源记录"""
     record.protocol = ProtocolType.DNS
     try:
-        # 从原始字节中提取 DNS 查询名
         raw = record.payload_raw
         if len(raw) < 12:
             return
 
         # DNS header: ID(2) + flags(2) + qdcount(2) + ancount(2) + nscount(2) + arcount(2)
+        dns_id = (raw[0] << 8) | raw[1]
+        dns_flags = (raw[2] << 8) | raw[3]
         qdcount = (raw[4] << 8) | raw[5]
+        ancount = (raw[6] << 8) | raw[7]
+        is_response = bool(dns_flags & 0x8000)
+
         if qdcount == 0:
             return
 
-        # 跳过 DNS 头部（12 字节）解析查询
+        # ---- 解析查询部分：提取域名 ----
         offset = 12
         domain_parts = []
         while offset < len(raw):
@@ -342,6 +449,10 @@ def _parse_dns(record: TrafficRecord):
                 offset += 1
                 break
             if length & 0xC0:  # 压缩指针
+                # 处理压缩指针: 2 字节指向包内其他位置
+                ptr = ((length & 0x3F) << 8) | raw[offset + 1]
+                # 从指针位置展开域名
+                _expand_dns_name(raw, ptr, domain_parts)
                 offset += 2
                 break
             offset += 1
@@ -357,15 +468,115 @@ def _parse_dns(record: TrafficRecord):
         if domain_parts:
             record.dns_query = ".".join(domain_parts)
 
-        # DNS 查询类型
+        # 查询类型 (在域名结束后的 2 字节)
         if offset + 2 <= len(raw):
             qtype = (raw[offset] << 8) | raw[offset + 1]
             type_map = {1: "A", 28: "AAAA", 15: "MX", 16: "TXT",
                         5: "CNAME", 2: "NS", 255: "ANY"}
             record.dns_query_type = type_map.get(qtype, f"TYPE{qtype}")
+            offset += 4  # 跳过 QTYPE + QCLASS
+
+        # ---- 解析响应部分：提取答案 (ancount 个资源记录) ----
+        if is_response and ancount > 0:
+            _parse_dns_answers(raw, offset, ancount, record)
 
     except Exception as e:
         logger.debug(f"DNS 解析异常: {e}")
+
+
+def _parse_dns_from_scapy(dns_layer, record: TrafficRecord):
+    """从 scapy 的 DNS 层提取信息（用于 IP/UDP/DNS 结构）"""
+    try:
+        record.protocol = ProtocolType.DNS
+        # 查询域名
+        if hasattr(dns_layer, 'qd') and dns_layer.qd:
+            qd = dns_layer.qd
+            if hasattr(qd, 'qname'):
+                qname = qd.qname
+                if isinstance(qname, bytes):
+                    record.dns_query = qname.decode("ascii", errors="replace").rstrip(".")
+                else:
+                    record.dns_query = str(qname).rstrip(".")
+            # 查询类型
+            if hasattr(qd, 'qtype'):
+                type_map = {1: "A", 28: "AAAA", 15: "MX", 16: "TXT",
+                            5: "CNAME", 2: "NS", 255: "ANY"}
+                record.dns_query_type = type_map.get(qd.qtype, f"TYPE{qd.qtype}")
+        # 响应答案
+        is_response = bool(dns_layer.qr) if hasattr(dns_layer, 'qr') else False
+        if is_response and hasattr(dns_layer, 'an') and dns_layer.an:
+            for ans in dns_layer.an:
+                if hasattr(ans, 'rdata'):
+                    rdata = ans.rdata
+                    if isinstance(rdata, bytes):
+                        try:
+                            rdata = rdata.decode("ascii", errors="replace")
+                        except Exception:
+                            rdata = str(rdata)
+                    record.dns_answers.append(str(rdata))
+    except Exception as e:
+        logger.debug(f"scapy DNS 解析异常: {e}")
+
+
+def _expand_dns_name(raw: bytes, offset: int, parts: list):
+    """展开 DNS 压缩域名"""
+    while offset < len(raw):
+        length = raw[offset]
+        if length == 0:
+            break
+        if length & 0xC0:  # 压缩指针
+            ptr = ((length & 0x3F) << 8) | raw[offset + 1]
+            offset = ptr
+            continue
+        offset += 1
+        if offset + length > len(raw):
+            break
+        try:
+            part = raw[offset:offset + length].decode("ascii", errors="replace")
+            parts.append(part)
+        except Exception:
+            break
+        offset += length
+
+
+def _parse_dns_answers(raw: bytes, offset: int, ancount: int, record: TrafficRecord):
+    """解析 DNS 响应中的 A/AAAA/CNAME 资源记录"""
+    for _ in range(ancount):
+        if offset >= len(raw):
+            break
+        # 域名 (可能是指针)
+        if raw[offset] & 0xC0:
+            offset += 2  # 跳过压缩指针
+        else:
+            while offset < len(raw) and raw[offset] != 0:
+                offset += raw[offset] + 1
+            offset += 1  # 跳过结束符
+        if offset + 10 > len(raw):
+            break
+        # TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2)
+        rtype = (raw[offset] << 8) | raw[offset + 1]
+        rdlength = (raw[offset + 8] << 8) | raw[offset + 9]
+        offset += 10
+        if offset + rdlength > len(raw):
+            break
+        # 解析 A / AAAA / CNAME 记录
+        if rtype == 1 and rdlength == 4:  # A 记录
+            ip = ".".join(str(raw[offset + i]) for i in range(4))
+            record.dns_answers.append(ip)
+        elif rtype == 28 and rdlength == 16:  # AAAA 记录
+            ip = ":".join(f"{raw[offset + i * 2]:02x}{raw[offset + i * 2 + 1]:02x}" for i in range(8))
+            record.dns_answers.append(ip)
+        elif rtype == 5:  # CNAME
+            cname_parts = []
+            _expand_dns_name(raw, offset, cname_parts)
+            if cname_parts:
+                record.dns_answers.append(".".join(cname_parts))
+        elif rtype == 16:  # TXT
+            txt_len = raw[offset] if rdlength > 0 else 0
+            if txt_len > 0:
+                txt = raw[offset + 1:offset + 1 + min(txt_len, rdlength - 1)].decode("ascii", errors="replace")
+                record.dns_answers.append(txt)
+        offset += rdlength
 
 
 # ==================== TLS 检测 ====================
@@ -373,7 +584,7 @@ def _parse_dns(record: TrafficRecord):
 
 def _detect_tls(record: TrafficRecord) -> bool:
     """
-    检测 TLS ClientHello / ServerHello 握手。
+    检测 TLS ClientHello / ServerHello 握手，提取版本号和 SNI。
 
     Returns:
         True 如果检测到 TLS 内容
@@ -384,9 +595,9 @@ def _detect_tls(record: TrafficRecord) -> bool:
 
     # TLS 记录层: ContentType(1) + Version(2) + Length(2)
     content_type = raw[0]
-    if content_type in (0x16, 0x17):  # 22=Handshake, 23=Application Data
+    if content_type == 0x16:  # 22 = Handshake
         record.protocol = ProtocolType.TLS
-        # TLS 版本
+        # TLS 版本（记录层版本）
         if len(raw) >= 3:
             ver_map = {
                 (0x03, 0x01): "TLS 1.0",
@@ -397,9 +608,96 @@ def _detect_tls(record: TrafficRecord) -> bool:
             ver = (raw[1], raw[2])
             record.tls_version = ver_map.get(ver, f"TLS 0x{raw[1]:02x}{raw[2]:02x}")
             record.protocol_detail = record.tls_version
+
+        # ---- 从 ClientHello (HandshakeType=0x01) 提取 SNI ----
+        if len(raw) >= 6 and raw[5] == 0x01:  # HandshakeType: ClientHello
+            _extract_tls_sni(raw, record)
+
+        return True
+
+    elif content_type == 0x17:  # 23 = Application Data (加密数据)
+        record.protocol = ProtocolType.TLS
+        if len(raw) >= 3:
+            ver = (raw[1], raw[2])
+            if ver in ((0x03, 0x01), (0x03, 0x02), (0x03, 0x03), (0x03, 0x04)):
+                record.tls_version = f"TLS (encrypted)"
+                record.protocol_detail = "TLS Application Data"
         return True
 
     return False
+
+
+def _extract_tls_sni(raw: bytes, record: TrafficRecord):
+    """
+    从 TLS ClientHello 中提取 SNI (Server Name Indication)。
+
+    ClientHello 结构（跳过固定字段后，在 extensions 中找 server_name）:
+      HandshakeType(1) + Length(3) + Version(2) + Random(32) + SessionID(1+var)
+      + CipherSuites(2+var) + Compression(1+var) + Extensions(2+var)
+    """
+    try:
+        offset = 6   # ContentType(1) + Version(2) + Length(2) + HandshakeType(1)
+        if offset + 3 > len(raw):
+            return
+        hs_len = (raw[offset] << 16) | (raw[offset + 1] << 8) | raw[offset + 2]
+        offset += 3
+        if offset + hs_len > len(raw):
+            return
+
+        offset += 2  # 跳过 Version(2)
+        offset += 32  # 跳过 Random(32)
+
+        # Session ID
+        if offset >= len(raw):
+            return
+        sid_len = raw[offset]
+        offset += 1 + sid_len
+
+        # Cipher Suites
+        if offset + 1 >= len(raw):
+            return
+        cs_len = (raw[offset] << 8) | raw[offset + 1]
+        offset += 2 + cs_len
+
+        # Compression Methods
+        if offset >= len(raw):
+            return
+        cm_len = raw[offset]
+        offset += 1 + cm_len
+
+        # Extensions
+        if offset + 1 >= len(raw):
+            return
+        ext_total_len = (raw[offset] << 8) | raw[offset + 1]
+        offset += 2
+
+        ext_end = offset + ext_total_len
+        while offset + 4 <= ext_end and offset + 4 <= len(raw):
+            ext_type = (raw[offset] << 8) | raw[offset + 1]
+            ext_len = (raw[offset + 2] << 8) | raw[offset + 3]
+            offset += 4
+            ext_data_end = offset + ext_len
+
+            if ext_type == 0x0000:  # server_name extension
+                # server_name list: length(2) + name_type(1) + name_len(2) + name
+                if offset + 2 > ext_data_end:
+                    break
+                # sni_len 跳过 list 长度
+                list_len = (raw[offset] << 8) | raw[offset + 1]
+                _ = list_len
+                offset += 2
+                if offset + 3 > ext_data_end:
+                    break
+                name_type = raw[offset]  # 0 = host_name
+                name_len = (raw[offset + 1] << 8) | raw[offset + 2]
+                offset += 3
+                if name_type == 0 and offset + name_len <= ext_data_end:
+                    record.tls_sni = raw[offset:offset + name_len].decode("ascii", errors="replace")
+                    break
+            offset = ext_data_end
+
+    except Exception:
+        pass  # SNI 解析失败不影响主流程
 
 
 # ==================== 批量解析 ====================

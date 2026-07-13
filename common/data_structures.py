@@ -35,6 +35,12 @@ class ProtocolType(Enum):
     DNS = "DNS"
     TLS = "TLS"
     ICMP = "ICMP"
+    ARP = "ARP"
+    SMB = "SMB"
+    RDP = "RDP"
+    MYSQL = "MYSQL"
+    REDIS = "REDIS"
+    MONGODB = "MONGODB"
     SSH = "SSH"
     FTP = "FTP"
     SMTP = "SMTP"
@@ -198,6 +204,10 @@ class TrafficRecord:
     tls_ja3_hash: str = ""
     tls_ja3s_hash: str = ""
     tls_is_self_signed: bool = False
+
+    # ===== ICMP 字段 =====
+    icmp_type: int = 0
+    icmp_code: int = 0
 
     # ===== 流/会话信息 =====
     flow_id: str = ""              # 五元组 hash
