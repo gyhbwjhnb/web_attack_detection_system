@@ -836,10 +836,10 @@ class MainWindow:
             messagebox.showerror("错误", f"导出失败: {e}")
 
     def _generate_html_report(self) -> str:
-        """生成 HTML 报告内容（内嵌 CSS，无外部依赖）"""
+        """生成美观的 HTML 分析报告（内嵌 CSS，无外部依赖）"""
         now = time.strftime("%Y-%m-%d %H:%M:%S")
 
-        # 统计计算
+        # ---- 统计计算 ----
         total_alerts = len(self._alerts)
         total_traffic = len(self._records)
         severity_count = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
@@ -862,149 +862,324 @@ class MainWindow:
                 max_severity = sev
                 break
         sev_names = {1: "信息", 2: "低危", 3: "中危", 4: "高危", 5: "严重"}
-        conclusion = "未发现异常" if max_severity == 0 else \
-            f"检测到最高 {sev_names.get(max_severity, '未知')} 级别告警"
+        sev_icon = {5: "🔴", 4: "🟠", 3: "🟡", 2: "🟢", 1: "🔵"}
+        if max_severity == 0:
+            conclusion_text = "✅ 系统运行正常，未检测到攻击行为"
+            conclusion_class = "clean"
+        elif max_severity >= 4:
+            conclusion_text = f"⚠️ 检测到 {severity_count.get(max_severity, 0)} 条{sev_names.get(max_severity, '')}级别告警，建议立即处理"
+            conclusion_class = "danger"
+        else:
+            conclusion_text = f"ℹ️ 检测到 {severity_count.get(max_severity, 0)} 条{sev_names.get(max_severity, '')}级别告警，请关注"
+            conclusion_class = "warning"
 
-        # 流量协议分布
+        # 攻击类型摘要
+        type_summary_parts = []
+        for t, c in sorted(type_count.items(), key=lambda x: -x[1])[:5]:
+            type_summary_parts.append(f"{t}({c}条)")
+        type_summary = "、".join(type_summary_parts) if type_summary_parts else "无"
+
+        # ---- 流量协议分布 ----
         proto_dist: Dict[str, int] = {}
         for r in self._records[-2000:]:
-            p = str(r.protocol) if hasattr(r, 'protocol') else "?"
+            p = r.protocol.value if hasattr(r, 'protocol') and r.protocol else "?"
             proto_dist[p] = proto_dist.get(p, 0) + 1
 
-        # 构建 alert 表格行
+        # 协议颜色映射
+        proto_colors = {
+            "TCP": "#1890ff", "UDP": "#52c41a", "HTTP": "#fa8c16",
+            "HTTPS": "#13c2c2", "DNS": "#722ed1", "TLS": "#eb2f96",
+            "ICMP": "#f5222d", "ARP": "#faad14", "SSH": "#0958d9",
+            "FTP": "#d48806", "SMTP": "#cf1322", "MYSQL": "#1677ff",
+            "REDIS": "#f5222d", "MONGODB": "#52c41a",
+        }
+
+        # ---- 告警表格行 ----
         alert_rows = ""
-        for a in self._alerts[-200:]:  # 最多 200 条
+        for a in self._alerts[-200:]:
             ts = time.strftime("%H:%M:%S", time.localtime(a.timestamp))
             sev_name = sev_names.get(a.severity.value, "未知")
-            sev_color = SEVERITY_COLORS.get(a.severity.value, "#000")
+            sev_cls = {5: "sev-critical", 4: "sev-high", 3: "sev-medium", 2: "sev-low", 1: "sev-info"}.get(a.severity.value, "")
             atype = a.attack_name or a.attack_type or "?"
             src = f"{a.src_ip}:{a.src_port}" if a.src_port else a.src_ip
             dst = f"{a.dst_ip}:{a.dst_port}" if a.dst_port else a.dst_ip
             state = self._alert_states.get(a.alert_id, {}).get("status", "待处理")
+            state_cls = {"待处理": "state-pending", "已确认": "state-confirmed",
+                         "误报": "state-fp", "已忽略": "state-ignored"}.get(state, "")
             alert_rows += f"""<tr>
-                <td>{a.alert_id[:8]}</td>
+                <td><code>{a.alert_id[:8]}</code></td>
                 <td>{ts}</td>
-                <td>{atype}</td>
-                <td style='color:{sev_color};font-weight:bold'>{sev_name}</td>
+                <td><span class="attack-tag">{atype}</span></td>
+                <td><span class="sev-badge {sev_cls}">{sev_name}</span></td>
                 <td>{src}</td>
                 <td>{dst}</td>
-                <td>{a.title or ''}</td>
-                <td>{state}</td>
+                <td class="desc-cell" title="{a.title or ''}">{a.title or '-'}</td>
+                <td><span class="state-badge {state_cls}">{state}</span></td>
             </tr>"""
+
+        # ---- 流量协议表格行 ----
+        proto_table_rows = ""
+        if proto_dist:
+            for p, c in sorted(proto_dist.items(), key=lambda x: -x[1])[:12]:
+                pct = c * 100 / max(total_traffic, 1)
+                color = proto_colors.get(p.upper(), "#8c8c8c")
+                proto_table_rows += f"""<tr>
+                    <td><span class="proto-dot" style="background:{color}"></span>{p}</td>
+                    <td>{c}</td>
+                    <td>{pct:.1f}%</td>
+                    <td><div class="mini-bar"><div class="mini-fill" style="width:{pct}%;background:{color}"></div></div></td>
+                </tr>"""
 
         return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>网络攻击检测报告 - {now}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>网络安全检测报告 - {now}</title>
 <style>
-  body {{ font-family: 'Microsoft YaHei', 'Segoe UI', Arial, sans-serif; background: #f0f2f5; margin: 0; padding: 20px; }}
-  .container {{ max-width: 1100px; margin: 0 auto; }}
-  .header {{ background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); color: white; padding: 30px; border-radius: 10px; margin-bottom: 20px; }}
-  .header h1 {{ margin: 0; font-size: 24px; }}
-  .header p {{ margin: 8px 0 0; opacity: 0.8; font-size: 14px; }}
-  .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 20px; }}
-  .card {{ background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); text-align: center; }}
-  .card .num {{ font-size: 32px; font-weight: bold; margin: 0; }}
-  .card .label {{ color: #666; font-size: 13px; margin-top: 4px; }}
-  .card.critical .num {{ color: #f5222d; }}
-  .card.high .num {{ color: #fa8c16; }}
-  .card.info .num {{ color: #1890ff; }}
-  .section {{ background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-bottom: 20px; }}
-  .section h2 {{ margin: 0 0 15px; font-size: 18px; border-left: 4px solid #1890ff; padding-left: 10px; }}
+  /* ===== Reset & Base ===== */
+  *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    font-family: 'Microsoft YaHei', -apple-system, 'Segoe UI', Arial, sans-serif;
+    background: #f0f2f5; color: #1f2937; margin: 0; padding: 24px; line-height: 1.6;
+  }}
+  .container {{ max-width: 1140px; margin: 0 auto; }}
+
+  /* ===== Header ===== */
+  .header {{
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #334155 100%);
+    color: #fff; padding: 32px 36px; border-radius: 12px; margin-bottom: 24px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+  }}
+  .header h1 {{ margin: 0; font-size: 26px; font-weight: 700; letter-spacing: 1px; }}
+  .header h1 span {{ color: #60a5fa; }}
+  .header .sub {{ margin: 10px 0 0; opacity: 0.75; font-size: 14px; display: flex; flex-wrap: wrap; gap: 8px 20px; }}
+  .header .sub-item {{ display: inline-flex; align-items: center; gap: 4px; }}
+
+  /* ===== Overview Cards ===== */
+  .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }}
+  .card {{
+    background: #fff; padding: 22px 16px; border-radius: 10px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06); text-align: center;
+    transition: transform 0.15s, box-shadow 0.15s;
+    border-top: 3px solid #d9d9d9;
+  }}
+  .card:hover {{ transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.1); }}
+  .card .num {{ font-size: 34px; font-weight: 800; margin: 4px 0 0; line-height: 1.2; }}
+  .card .label {{ color: #64748b; font-size: 13px; margin-top: 4px; letter-spacing: 0.3px; }}
+  .card.card-danger {{ border-top-color: #f5222d; }}
+  .card.card-danger .num {{ color: #f5222d; }}
+  .card.card-warning {{ border-top-color: #fa8c16; }}
+  .card.card-warning .num {{ color: #fa8c16; }}
+  .card.card-info {{ border-top-color: #1890ff; }}
+  .card.card-info .num {{ color: #1890ff; }}
+  .card.card-success {{ border-top-color: #52c41a; }}
+  .card.card-success .num {{ color: #52c41a; }}
+
+  /* ===== Sections ===== */
+  .section {{
+    background: #fff; padding: 24px 28px; border-radius: 10px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06); margin-bottom: 20px;
+  }}
+  .section-title {{
+    margin: 0 0 16px; font-size: 17px; font-weight: 700;
+    border-left: 4px solid #3b82f6; padding-left: 12px; color: #0f172a;
+  }}
+  .section-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }}
+  @media (max-width: 700px) {{ .section-grid {{ grid-template-columns: 1fr; }} }}
+
+  /* ===== Conclusion ===== */
+  .conclusion {{
+    display: flex; align-items: center; gap: 10px;
+    font-size: 16px; padding: 16px 20px; border-radius: 8px;
+    border: 1px solid #ffd591; background: #fffbe6;
+  }}
+  .conclusion.clean {{ border-color: #b7eb8f; background: #f6ffed; }}
+  .conclusion.danger {{ border-color: #ffa39e; background: #fff1f0; }}
+  .conclusion.warning {{ border-color: #ffe58f; background: #fffbe6; }}
+  .conclusion .summary {{ color: #595959; font-size: 13px; margin-top: 4px; }}
+
+  /* ===== Stat Bars ===== */
+  .stat-bar {{ display: flex; margin: 8px 0; align-items: center; gap: 0; }}
+  .stat-bar .bar-label {{
+    width: 100px; min-width: 100px; font-size: 13px; font-weight: 500;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #333;
+  }}
+  .stat-bar .bar-track {{
+    flex: 1; background: #f0f0f0; height: 22px; border-radius: 11px; overflow: hidden; position: relative;
+  }}
+  .stat-bar .bar-fill {{
+    height: 100%; border-radius: 11px; min-width: 24px;
+    display: flex; align-items: center; justify-content: flex-end;
+    padding-right: 8px; color: #fff; font-size: 11px; font-weight: 600;
+    line-height: 22px; transition: width 0.3s;
+  }}
+
+  /* ===== Tables ===== */
+  .table-wrap {{ overflow-x: auto; }}
   table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
-  th, td {{ padding: 8px 6px; border-bottom: 1px solid #f0f0f0; text-align: left; }}
-  th {{ background: #fafafa; font-weight: 600; }}
-  tr:hover {{ background: #e6f7ff; }}
-  .stat-bar {{ display: flex; margin: 8px 0; align-items: center; }}
-  .stat-bar .bar-label {{ width: 80px; font-size: 13px; }}
-  .stat-bar .bar-track {{ flex: 1; background: #f0f0f0; height: 20px; border-radius: 10px; overflow: hidden; }}
-  .stat-bar .bar-fill {{ height: 100%; border-radius: 10px; min-width: 20px; text-align: right; padding-right: 6px; color: white; font-size: 11px; line-height: 20px; }}
-  .footer {{ text-align: center; color: #999; font-size: 12px; margin-top: 30px; }}
-  .conclusion {{ font-size: 16px; padding: 16px; border-radius: 6px; background: #fff7e6; border: 1px solid #ffd591; }}
-  .conclusion.clean {{ background: #f6ffed; border-color: #b7eb8f; }}
+  th, td {{ padding: 10px 8px; border-bottom: 1px solid #f0f0f0; text-align: left; vertical-align: middle; }}
+  th {{ background: #fafafa; font-weight: 600; color: #475569; font-size: 12px; text-transform: uppercase; letter-spacing: 0.3px; }}
+  tr:last-child td {{ border-bottom: none; }}
+  tbody tr:hover {{ background: #f0f7ff; }}
+  tbody tr:nth-child(even) {{ background: #fafbfc; }}
+  tbody tr:nth-child(even):hover {{ background: #f0f7ff; }}
+  .desc-cell {{ max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+
+  /* ----- Badges ----- */
+  .sev-badge {{
+    display: inline-block; padding: 2px 10px; border-radius: 10px;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.3px;
+  }}
+  .sev-critical {{ background: #fff1f0; color: #cf1322; border: 1px solid #ffa39e; }}
+  .sev-high {{ background: #fff7e6; color: #d46b08; border: 1px solid #ffd591; }}
+  .sev-medium {{ background: #fffbe6; color: #d4b106; border: 1px solid #ffe58f; }}
+  .sev-low {{ background: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f; }}
+  .sev-info {{ background: #e6f7ff; color: #096dd9; border: 1px solid #91d5ff; }}
+
+  .state-badge {{
+    display: inline-block; padding: 2px 10px; border-radius: 10px;
+    font-size: 11px; font-weight: 600;
+  }}
+  .state-pending {{ background: #fff1f0; color: #cf1322; }}
+  .state-confirmed {{ background: #e6f7ff; color: #096dd9; }}
+  .state-fp {{ background: #f6ffed; color: #389e0d; }}
+  .state-ignored {{ background: #f5f5f5; color: #8c8c8c; }}
+
+  .attack-tag {{
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    background: #f0f5ff; color: #1d39c4; font-size: 12px;
+  }}
+
+  /* ===== Protocol Distribution ===== */
+  .proto-table {{ margin-top: 12px; }}
+  .proto-table td {{ padding: 6px 8px; }}
+  .proto-dot {{ display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }}
+  .mini-bar {{ height: 8px; background: #f0f0f0; border-radius: 4px; overflow: hidden; min-width: 60px; }}
+  .mini-fill {{ height: 100%; border-radius: 4px; transition: width 0.3s; }}
+
+  /* ===== Footer ===== */
+  .footer {{ text-align: center; color: #94a3b8; font-size: 12px; margin-top: 32px; padding: 16px 0; border-top: 1px solid #e2e8f0; }}
+
+  /* ===== Print ===== */
+  @media print {{
+    body {{ background: #fff; padding: 0; }}
+    .header {{ border-radius: 0; box-shadow: none; }}
+    .card, .section {{ box-shadow: none; border: 1px solid #e2e8f0; break-inside: avoid; }}
+  }}
 </style>
 </head>
 <body>
 <div class="container">
 
+<!-- ==================== HEADER ==================== -->
 <div class="header">
-  <h1>网络攻击检测系统 - 分析报告</h1>
-  <p>生成时间: {now} | 检测引擎: 特征匹配 + 异常行为分析</p>
+  <h1>🛡️ <span>网络攻击检测系统</span> · 分析报告</h1>
+  <div class="sub">
+    <span class="sub-item">📅 生成时间: {now}</span>
+    <span class="sub-item">🔍 检测引擎: 特征匹配 + 异常行为分析</span>
+    <span class="sub-item">📊 数据范围: {total_alerts} 条告警 / {total_traffic} 条流量</span>
+  </div>
 </div>
 
-<!-- 概览卡片 -->
+<!-- ==================== OVERVIEW CARDS ==================== -->
 <div class="cards">
-  <div class="card {'critical' if severity_count.get(5,0) > 0 else 'high' if max_severity >= 4 else 'info'}">
+  <div class="card {'card-danger' if severity_count.get(5,0) > 0 else 'card-warning' if max_severity >= 4 else 'card-info'}">
     <p class="num">{total_alerts}</p>
-    <p class="label">告警总数</p>
+    <p class="label">📋 告警总数</p>
   </div>
-  <div class="card info">
+  <div class="card card-info">
     <p class="num">{total_traffic}</p>
-    <p class="label">流量记录</p>
+    <p class="label">🌐 流量记录</p>
   </div>
-  <div class="card high">
-    <p class="num">{severity_count.get(4, 0) + severity_count.get(5, 0)}</p>
-    <p class="label">高危/严重告警</p>
+  <div class="card card-danger">
+    <p class="num">{severity_count.get(5, 0)}</p>
+    <p class="label">🔴 严重告警</p>
+  </div>
+  <div class="card card-warning">
+    <p class="num">{severity_count.get(4, 0)}</p>
+    <p class="label">🟠 高危告警</p>
+  </div>
+  <div class="card card-success">
+    <p class="num">{status_count.get("已确认", 0) + status_count.get("误报", 0) + status_count.get("已忽略", 0) if total_alerts > 0 else 0}</p>
+    <p class="label">✅ 已处理状态</p>
   </div>
 </div>
 
-<!-- 结论 -->
+<!-- ==================== CONCLUSION ==================== -->
 <div class="section">
-  <h2>检测结论</h2>
-  <div class="conclusion {'clean' if max_severity <= 2 else ''}">
-    <strong>{conclusion}</strong>
-    {f'（{type_count}）' if max_severity > 0 else ''}
+  <h2 class="section-title">检测结论</h2>
+  <div class="conclusion {conclusion_class}">
+    <div>
+      <div><strong>{conclusion_text}</strong></div>
+      <div class="summary">
+        攻击类型分布：{type_summary}
+        {' | 共 ' + str(len(type_count)) + ' 种攻击类型' if type_count else ''}
+      </div>
+    </div>
   </div>
 </div>
 
-<!-- 攻击类型分布 -->
-<div class="section">
-  <h2>攻击类型分布</h2>
-  {''.join(f'''<div class="stat-bar">
-    <span class="bar-label">{t}</span>
-    <div class="bar-track"><div class="bar-fill" style="width:{max(5, c*100//max(type_count.values(), default=1))}%; background:#fa8c16">{c}</div></div>
-  </div>''' for t, c in sorted(type_count.items(), key=lambda x: -x[1])[:8])}
+<!-- ==================== TWO-COLUMN CHARTS ==================== -->
+<div class="section-grid">
+
+  <!-- 攻击类型分布 -->
+  <div class="section">
+    <h2 class="section-title">🎯 攻击类型分布</h2>
+    {''.join(f'''<div class="stat-bar">
+      <span class="bar-label" title="{t}">{t}</span>
+      <div class="bar-track"><div class="bar-fill" style="width:{max(5, c*100//max(type_count.values(), default=1))}%; background:#f59e0b">{c}</div></div>
+    </div>''' for t, c in sorted(type_count.items(), key=lambda x: -x[1])[:8]) or '<div style="color:#999;text-align:center;padding:20px">暂无攻击数据</div>'}
+  </div>
+
+  <!-- 严重度分布 -->
+  <div class="section">
+    <h2 class="section-title">⚠️ 严重度分布</h2>
+    {''.join(f'''<div class="stat-bar">
+      <span class="bar-label">{sev_icon.get(s, '')} {sev_names[s]}</span>
+      <div class="bar-track"><div class="bar-fill" style="width:{max(5, severity_count[s]*100//max(total_alerts, 1))}%; background:{SEVERITY_COLORS.get(s, '#999')}">{severity_count[s]}</div></div>
+    </div>''' for s in (5, 4, 3, 2, 1) if severity_count.get(s, 0) > 0) or '<div style="color:#999;text-align:center;padding:20px">暂无告警数据</div>'}
+  </div>
+
 </div>
 
-<!-- 严重度分布 -->
-<div class="section">
-  <h2>严重度分布</h2>
-  {''.join(f'''<div class="stat-bar">
-    <span class="bar-label">{sev_names[s]}</span>
-    <div class="bar-track"><div class="bar-fill" style="width:{max(5, severity_count[s]*100//max(total_alerts, 1))}%; background:{SEVERITY_COLORS.get(s, '#999')}">{severity_count[s]}</div></div>
-  </div>''' for s in (5, 4, 3, 2, 1) if severity_count.get(s, 0) > 0)}
+<!-- ==================== ALERT STATUS & PROTOCOL ==================== -->
+<div class="section-grid">
+
+  <!-- 告警处理状态 -->
+  <div class="section">
+    <h2 class="section-title">📌 告警处理状态</h2>
+    {''.join(f'''<div class="stat-bar">
+      <span class="bar-label">{k}</span>
+      <div class="bar-track"><div class="bar-fill" style="width:{max(5, v*100//max(total_alerts, 1))}%; background:{'#ff4d4f' if k == '待处理' else '#1890ff' if k == '已确认' else '#52c41a' if k == '误报' else '#8c8c8c'}">{v}</div></div>
+    </div>''' for k, v in sorted(status_count.items(), key=lambda x: -x[1]) if v > 0) or '<div style="color:#999;text-align:center;padding:20px">无数据</div>'}
+  </div>
+
+  <!-- 流量协议分布 -->
+  <div class="section">
+    <h2 class="section-title">📡 流量协议分布</h2>
+    <div style="color:#64748b;font-size:12px;margin-bottom:10px">最近 {min(len(self._records), 2000)} 条记录</div>
+    {proto_table_rows or '<div style="color:#999;text-align:center;padding:20px">暂无流量数据</div>'}
+  </div>
+
 </div>
 
-<!-- 告警处理状态 -->
+<!-- ==================== ALERT DETAIL TABLE ==================== -->
 <div class="section">
-  <h2>告警处理状态</h2>
-  {''.join(f'''<div class="stat-bar">
-    <span class="bar-label">{k}</span>
-    <div class="bar-track"><div class="bar-fill" style="width:{max(5, v*100//max(total_alerts, 1))}%; background:{'#f5222d' if k == '待处理' else '#1890ff' if k == '已确认' else '#52c41a' if k == '误报' else '#8c8c8c'}">{v}</div></div>
-  </div>''' for k, v in status_count.items() if v > 0)}
-</div>
-
-<!-- 流量协议分布 -->
-<div class="section">
-  <h2>流量协议分布（最近 {min(len(self._records), 2000)} 条）</h2>
-  {''.join(f'''<div class="stat-bar">
-    <span class="bar-label">{p}</span>
-    <div class="bar-track"><div class="bar-fill" style="width:{max(5, c*100//max(proto_dist.values(), default=1))}%; background:#1890ff">{c}</div></div>
-  </div>''' for p, c in sorted(proto_dist.items(), key=lambda x: -x[1])[:8])}
-</div>
-
-<!-- 告警明细表 -->
-<div class="section">
-  <h2>告警明细（最近 {min(total_alerts, 200)} 条）</h2>
+  <h2 class="section-title">📋 告警明细（最近 {min(total_alerts, 200)} 条）</h2>
+  <div class="table-wrap">
   <table>
-    <thead><tr><th>ID</th><th>时间</th><th>攻击类型</th><th>等级</th><th>来源</th><th>目标</th><th>描述</th><th>状态</th></tr></thead>
-    <tbody>{alert_rows or '<tr><td colspan="8" style="text-align:center;color:#999">暂无数据</td></tr>'}</tbody>
+    <thead><tr>
+      <th>ID</th><th>时间</th><th>攻击类型</th><th>等级</th><th>来源</th><th>目标</th><th>描述</th><th>状态</th>
+    </tr></thead>
+    <tbody>{alert_rows or '<tr><td colspan="8" style="text-align:center;color:#999;padding:32px">📭 暂无告警数据</td></tr>'}</tbody>
   </table>
+  </div>
 </div>
 
+<!-- ==================== FOOTER ==================== -->
 <div class="footer">
-  <p>网络攻击检测系统 &copy; 2026 | 自动生成，仅供参考</p>
+  <p>🛡️ 网络攻击检测系统 &copy; 2026 &nbsp;|&nbsp; 自动生成，仅供参考 &nbsp;|&nbsp; 生成时间: {now}</p>
 </div>
 
 </div>
@@ -1424,7 +1599,10 @@ class MainWindow:
         if not values:
             return
         # values[0] 是序号，对应 self._records 中的索引
-        idx = values[0]
+        try:
+            idx = int(values[0])
+        except (ValueError, TypeError):
+            return
         if 1 <= idx <= len(self._records):
             record = self._records[idx - 1]
             TrafficDetailDialog(self._root, record)
