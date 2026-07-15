@@ -37,7 +37,7 @@ from common.data_structures import (
     TrafficRecord, Alert, SignatureRule,
     AlertSeverity, AlertType, AlertStatus,
 )
-from common.config import SIGNATURE_CONFIG, ATTACK_TYPES, SEVERITY_LEVELS
+from common.config import SIGNATURE_CONFIG, ATTACK_TYPES, SEVERITY_LEVELS, WHITELIST_IPS
 from common.engine import ISignatureEngine
 from common.utils import setup_logger
 
@@ -163,6 +163,10 @@ class SignatureEngine(ISignatureEngine):
             检测到的 Alert 列表（可能为空）
         """
         with self._lock:
+            # 白名单检查：来源或目标 IP 在白名单中 → 静默
+            if record.src.ip in WHITELIST_IPS or record.dst.ip in WHITELIST_IPS:
+                return []
+
             self._traffic_processed += 1
 
         alerts: List[Alert] = []
