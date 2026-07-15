@@ -31,7 +31,7 @@ from common.data_structures import (
     TrafficRecord, Alert, Baseline, AttackChain,
     AlertSeverity, AlertType, AlertStatus, ProtocolType,
 )
-from common.config import ANOMALY_CONFIG, get_attack_info
+from common.config import ANOMALY_CONFIG, WHITELIST_IPS, get_attack_info
 from common.utils import setup_logger
 
 logger = setup_logger("module3_anomaly", "logs/module3.log")
@@ -233,6 +233,10 @@ class AnomalyEngine(IAnomalyEngine):
     # ==================== 主检测 ====================
 
     def process_traffic(self, record: TrafficRecord) -> List[Alert]:
+        # 白名单检查：来源或目标 IP 在白名单中 → 静默
+        if record.src.ip in WHITELIST_IPS or record.dst.ip in WHITELIST_IPS:
+            return []
+
         alerts: List[Alert] = []
 
         src_ip = record.src.ip

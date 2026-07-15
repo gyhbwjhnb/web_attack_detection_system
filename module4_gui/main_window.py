@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from common import message_bus
 from common.data_structures import Alert, AlertSeverity, AttackChain, TrafficRecord
-from common.config import UI_CONFIG, SEVERITY_LEVELS, ATTACK_TYPES, ANOMALY_CONFIG, CAPTURE_CONFIG
+from common.config import UI_CONFIG, SEVERITY_LEVELS, ATTACK_TYPES, ANOMALY_CONFIG, CAPTURE_CONFIG, WHITELIST_IPS
 from common.utils import setup_logger
 
 logger = setup_logger("module4_gui", "logs/module4.log")
@@ -89,6 +89,9 @@ class MainWindow:
         self._known_ips: set = set()
         self._known_ports: set = set()
 
+        # ---- 告警处理状态 ----
+        self._alert_states: Dict[str, dict] = {}  # alert_id -> {"status": "待处理", "note": ""}
+
         # ---- 回调 ----
         self._on_start: Optional[Callable[[], None]] = None
         self._on_stop: Optional[Callable[[], None]] = None
@@ -120,6 +123,7 @@ class MainWindow:
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label="导出告警 CSV...", command=self._export_csv)
         file_menu.add_command(label="导出告警 TXT...", command=self._export_txt)
+        file_menu.add_command(label="导出报告 HTML...", command=self._export_report_html)
         file_menu.add_separator()
         file_menu.add_command(label="清空告警列表", command=self._clear_alerts)
         file_menu.add_command(label="清空流量列表", command=self._clear_traffic)
@@ -130,10 +134,12 @@ class MainWindow:
         # 配置菜单
         config_menu = tk.Menu(menubar, tearoff=0)
         config_menu.add_command(label="检测阈值设置...", command=self._open_config_dialog)
+        config_menu.add_command(label="白名单管理...", command=self._open_whitelist_dialog)
         menubar.add_cascade(label="配置", menu=config_menu)
 
         # 帮助菜单
         help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label="使用帮助", command=self._open_help_dialog)
         help_menu.add_command(label="关于", command=self._show_about)
         menubar.add_cascade(label="帮助", menu=help_menu)
 
@@ -212,7 +218,7 @@ class MainWindow:
         table_frame = ttk.Frame(parent)
         table_frame.pack(fill=tk.BOTH, expand=True)
 
-        columns = ("id", "time", "type", "severity", "src", "dst", "description")
+        columns = ("id", "time", "type", "severity", "src", "dst", "description", "status", "note")
         self._tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse")
 
         self._tree.heading("id", text="ID")
@@ -222,14 +228,18 @@ class MainWindow:
         self._tree.heading("src", text="来源")
         self._tree.heading("dst", text="目标")
         self._tree.heading("description", text="描述")
+        self._tree.heading("status", text="状态")
+        self._tree.heading("note", text="备注")
 
-        self._tree.column("id", width=80, minwidth=60)
-        self._tree.column("time", width=140, minwidth=100)
-        self._tree.column("type", width=100, minwidth=80)
-        self._tree.column("severity", width=50, minwidth=40)
+        self._tree.column("id", width=65, minwidth=55)
+        self._tree.column("time", width=120, minwidth=90)
+        self._tree.column("type", width=90, minwidth=70)
+        self._tree.column("severity", width=45, minwidth=40)
         self._tree.column("src", width=140, minwidth=100)
         self._tree.column("dst", width=140, minwidth=100)
-        self._tree.column("description", width=300, minwidth=150)
+        self._tree.column("description", width=220, minwidth=120)
+        self._tree.column("status", width=60, minwidth=55)
+        self._tree.column("note", width=100, minwidth=60)
 
         # 滚动条
         scrollbar_y = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self._tree.yview)
@@ -249,6 +259,11 @@ class MainWindow:
 
         # 双击查看详情
         self._tree.bind("<Double-1>", self._on_alert_double_click)
+
+        # 右键菜单
+        self._tree.bind("<Button-3>", self._on_alert_right_click)
+        if sys.platform == "darwin":
+            self._tree.bind("<Button-2>", self._on_alert_right_click)
 
     def _build_traffic_table(self, parent: ttk.Frame):
         """正常流量表格"""
@@ -433,7 +448,13 @@ class MainWindow:
         return True
 
     def _insert_alert_row(self, alert: Alert):
-        """将一条告警插入树表格"""
+        """将一条告警插入树表格（仅底部时跟随滚动）"""
+        # 插入前：用户是否在看最新（底部）
+        at_bottom = self._tree.yview()[1] >= 0.99
+
+        # 初始状态
+        state = self._alert_states.setdefault(alert.alert_id, {"status": "待处理", "note": ""})
+
         ts = time.strftime("%H:%M:%S", time.localtime(alert.timestamp))
         severity_name = SEVERITY_LEVELS.get(alert.severity.value, {}).get("name", str(alert.severity.value))
         tag = SEVERITY_TAGS.get(alert.severity.value, "")
@@ -441,7 +462,7 @@ class MainWindow:
         src = f"{alert.src_ip}:{alert.src_port}" if alert.src_port else alert.src_ip
         dst = f"{alert.dst_ip}:{alert.dst_port}" if alert.dst_port else alert.dst_ip
 
-        self._tree.insert("", 0, values=(
+        self._tree.insert("", "end", values=(
             alert.alert_id[:8],
             ts,
             alert.attack_name or alert.attack_type,
@@ -449,12 +470,20 @@ class MainWindow:
             src,
             dst,
             alert.title or alert.description[:60],
+            state["status"],
+            state["note"],
         ), tags=(tag,))
 
-        # 限制表格行数
+        # 超出上限删最旧行
         children = self._tree.get_children()
         if len(children) > self._max_alerts:
-            self._tree.delete(children[-1])
+            self._tree.delete(children[0])
+
+        # 仅在用户处于底部时才跟随最新
+        if at_bottom:
+            children = self._tree.get_children()
+            if children:
+                self._tree.see(children[-1])
 
     def add_traffic_record(self, record: TrafficRecord):
         """接收 TrafficRecord 并添加到流量列表"""
@@ -504,7 +533,10 @@ class MainWindow:
         return True
 
     def _insert_traffic_row(self, record: TrafficRecord):
-        """将一条流量记录插入树表格"""
+        """将一条流量记录插入树表格（仅底部时跟随滚动）"""
+        # 插入前：用户是否在看最新（底部）
+        at_bottom = self._traffic_tree.yview()[1] >= 0.99
+
         ts = time.strftime("%H:%M:%S", time.localtime(record.timestamp)) if record.timestamp else "--:--:--"
         proto = (record.protocol or {}).value if hasattr(record.protocol, 'value') else str(record.protocol or "?")
 
@@ -534,14 +566,20 @@ class MainWindow:
             tag = "tls"
 
         idx = len(self._records)
-        self._traffic_tree.insert("", 0, values=(
+        self._traffic_tree.insert("", "end", values=(
             idx, ts, proto, src, dst, info,
         ), tags=(tag,))
 
-        # 限制表格行数
+        # 超出上限删最旧行
         children = self._traffic_tree.get_children()
         if len(children) > self._max_records:
-            self._traffic_tree.delete(children[-1])
+            self._traffic_tree.delete(children[0])
+
+        # 仅在用户处于底部时才跟随最新
+        if at_bottom:
+            children = self._traffic_tree.get_children()
+            if children:
+                self._traffic_tree.see(children[-1])
 
     def update_statistics(self, stats: dict):
         """更新统计面板"""
@@ -593,6 +631,7 @@ class MainWindow:
             self._clear_traffic()
             self._alerts.clear()
             self._records.clear()
+            self._alert_states.clear()
             self._stats = {}
             # 通知后台引擎一起重置
             message_bus.publish(message_bus.EVENT_CONFIG_CHANGE, {"action": "reset"})
@@ -600,6 +639,105 @@ class MainWindow:
             self._refresh_stats()
             self._status_text.set("统计已重置")
             logger.info("统计已重置")
+
+    # ==================== 告警右键菜单 ====================
+
+    def _on_alert_right_click(self, event):
+        """右键菜单：修改状态 / 编辑备注"""
+        row_id = self._tree.identify_row(event.y)
+        if not row_id:
+            return
+
+        self._tree.selection_set(row_id)
+        values = self._tree.item(row_id, "values")
+        if not values:
+            return
+
+        alert_id_full = self._get_full_alert_id_from_row(values)
+
+        menu = tk.Menu(self._root, tearoff=0)
+
+        status_menu = tk.Menu(menu, tearoff=0)
+        current_status = self._alert_states.get(alert_id_full, {}).get("status", "待处理")
+        for s in ("待处理", "已确认", "误报", "已忽略"):
+            if s == current_status:
+                status_menu.add_command(label=f"✓ {s}")
+            else:
+                status_menu.add_command(
+                    label=s,
+                    command=lambda sid=alert_id_full, st=s: self._set_alert_status(sid, st, row_id),
+                )
+
+        menu.add_cascade(label="修改状态", menu=status_menu)
+        menu.add_command(
+            label="编辑备注...",
+            command=lambda: self._edit_alert_note(alert_id_full, row_id),
+        )
+        menu.add_separator()
+        menu.add_command(label="取消", command=lambda: None)
+
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _set_alert_status(self, alert_id: str, status: str, row_id: str):
+        """修改一条告警的状态"""
+        if alert_id not in self._alert_states:
+            self._alert_states[alert_id] = {"status": "待处理", "note": ""}
+        self._alert_states[alert_id]["status"] = status
+
+        # 更新表格显示
+        if self._tree.exists(row_id):
+            values = list(self._tree.item(row_id, "values"))
+            values[7] = status
+            self._tree.item(row_id, values=values)
+
+        self._status_text.set(f"告警状态已更新: {status}")
+        logger.info(f"告警 {alert_id[:8]} 状态 → {status}")
+
+    def _edit_alert_note(self, alert_id: str, row_id: str):
+        """弹窗编辑告警备注"""
+        if alert_id not in self._alert_states:
+            self._alert_states[alert_id] = {"status": "待处理", "note": ""}
+
+        current_note = self._alert_states[alert_id].get("note", "")
+
+        dialog = tk.Toplevel(self._root)
+        dialog.title("编辑告警备注")
+        dialog.geometry("400x200")
+        dialog.transient(self._root)
+        dialog.grab_set()
+
+        ttk.Label(dialog, text="备注内容:", padding=(8, 4)).pack(anchor=tk.W)
+
+        text = tk.Text(dialog, width=45, height=6, font=("", 10))
+        text.insert("1.0", current_note)
+        text.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
+
+        def save():
+            note = text.get("1.0", "end-1c").strip()
+            self._alert_states[alert_id]["note"] = note
+            if self._tree.exists(row_id):
+                values = list(self._tree.item(row_id, "values"))
+                values[8] = note[:50]
+                self._tree.item(row_id, values=values)
+            self._status_text.set("备注已保存")
+            dialog.destroy()
+
+        ttk.Button(btn_frame, text="保存", command=save).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btn_frame, text="取消", command=dialog.destroy).pack(side=tk.RIGHT, padx=4)
+
+    def _get_full_alert_id_from_row(self, values: tuple) -> str:
+        """从表格行值反查完整 alert_id"""
+        id_prefix = values[0]
+        for a in self._alerts:
+            if a.alert_id.startswith(id_prefix):
+                return a.alert_id
+        return id_prefix
 
     # ==================== 菜单事件 ====================
 
@@ -673,10 +811,211 @@ class MainWindow:
         except Exception as e:
             messagebox.showerror("错误", f"导出失败: {e}")
 
+    def _export_report_html(self):
+        """导出美观的 HTML 分析报告"""
+        if not self._alerts and not self._stats:
+            messagebox.showinfo("提示", "无数据可导出")
+            return
+
+        path = filedialog.asksaveasfilename(
+            defaultextension=".html",
+            filetypes=[("HTML 文件", "*.html")],
+            initialfile="detection_report.html",
+        )
+        if not path:
+            return
+
+        try:
+            html = self._generate_html_report()
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(html)
+            self._status_text.set(f"报告已导出: {os.path.basename(path)}")
+            messagebox.showinfo("成功", f"HTML 报告已导出到:\n{path}")
+            logger.info(f"HTML 报告导出: {path}")
+        except Exception as e:
+            messagebox.showerror("错误", f"导出失败: {e}")
+
+    def _generate_html_report(self) -> str:
+        """生成 HTML 报告内容（内嵌 CSS，无外部依赖）"""
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+
+        # 统计计算
+        total_alerts = len(self._alerts)
+        total_traffic = len(self._records)
+        severity_count = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
+        type_count: Dict[str, int] = {}
+        status_count = {"待处理": 0, "已确认": 0, "误报": 0, "已忽略": 0}
+        for a in self._alerts:
+            sev = a.severity.value
+            if sev in severity_count:
+                severity_count[sev] += 1
+            atype = a.attack_name or a.attack_type or "未知"
+            type_count[atype] = type_count.get(atype, 0) + 1
+            aid = a.alert_id
+            st = self._alert_states.get(aid, {}).get("status", "待处理")
+            status_count[st] = status_count.get(st, 0) + 1
+
+        # 最高严重度
+        max_severity = 0
+        for sev in (5, 4, 3, 2, 1):
+            if severity_count.get(sev, 0) > 0:
+                max_severity = sev
+                break
+        sev_names = {1: "信息", 2: "低危", 3: "中危", 4: "高危", 5: "严重"}
+        conclusion = "未发现异常" if max_severity == 0 else \
+            f"检测到最高 {sev_names.get(max_severity, '未知')} 级别告警"
+
+        # 流量协议分布
+        proto_dist: Dict[str, int] = {}
+        for r in self._records[-2000:]:
+            p = str(r.protocol) if hasattr(r, 'protocol') else "?"
+            proto_dist[p] = proto_dist.get(p, 0) + 1
+
+        # 构建 alert 表格行
+        alert_rows = ""
+        for a in self._alerts[-200:]:  # 最多 200 条
+            ts = time.strftime("%H:%M:%S", time.localtime(a.timestamp))
+            sev_name = sev_names.get(a.severity.value, "未知")
+            sev_color = SEVERITY_COLORS.get(a.severity.value, "#000")
+            atype = a.attack_name or a.attack_type or "?"
+            src = f"{a.src_ip}:{a.src_port}" if a.src_port else a.src_ip
+            dst = f"{a.dst_ip}:{a.dst_port}" if a.dst_port else a.dst_ip
+            state = self._alert_states.get(a.alert_id, {}).get("status", "待处理")
+            alert_rows += f"""<tr>
+                <td>{a.alert_id[:8]}</td>
+                <td>{ts}</td>
+                <td>{atype}</td>
+                <td style='color:{sev_color};font-weight:bold'>{sev_name}</td>
+                <td>{src}</td>
+                <td>{dst}</td>
+                <td>{a.title or ''}</td>
+                <td>{state}</td>
+            </tr>"""
+
+        return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>网络攻击检测报告 - {now}</title>
+<style>
+  body {{ font-family: 'Microsoft YaHei', 'Segoe UI', Arial, sans-serif; background: #f0f2f5; margin: 0; padding: 20px; }}
+  .container {{ max-width: 1100px; margin: 0 auto; }}
+  .header {{ background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); color: white; padding: 30px; border-radius: 10px; margin-bottom: 20px; }}
+  .header h1 {{ margin: 0; font-size: 24px; }}
+  .header p {{ margin: 8px 0 0; opacity: 0.8; font-size: 14px; }}
+  .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 20px; }}
+  .card {{ background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); text-align: center; }}
+  .card .num {{ font-size: 32px; font-weight: bold; margin: 0; }}
+  .card .label {{ color: #666; font-size: 13px; margin-top: 4px; }}
+  .card.critical .num {{ color: #f5222d; }}
+  .card.high .num {{ color: #fa8c16; }}
+  .card.info .num {{ color: #1890ff; }}
+  .section {{ background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-bottom: 20px; }}
+  .section h2 {{ margin: 0 0 15px; font-size: 18px; border-left: 4px solid #1890ff; padding-left: 10px; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+  th, td {{ padding: 8px 6px; border-bottom: 1px solid #f0f0f0; text-align: left; }}
+  th {{ background: #fafafa; font-weight: 600; }}
+  tr:hover {{ background: #e6f7ff; }}
+  .stat-bar {{ display: flex; margin: 8px 0; align-items: center; }}
+  .stat-bar .bar-label {{ width: 80px; font-size: 13px; }}
+  .stat-bar .bar-track {{ flex: 1; background: #f0f0f0; height: 20px; border-radius: 10px; overflow: hidden; }}
+  .stat-bar .bar-fill {{ height: 100%; border-radius: 10px; min-width: 20px; text-align: right; padding-right: 6px; color: white; font-size: 11px; line-height: 20px; }}
+  .footer {{ text-align: center; color: #999; font-size: 12px; margin-top: 30px; }}
+  .conclusion {{ font-size: 16px; padding: 16px; border-radius: 6px; background: #fff7e6; border: 1px solid #ffd591; }}
+  .conclusion.clean {{ background: #f6ffed; border-color: #b7eb8f; }}
+</style>
+</head>
+<body>
+<div class="container">
+
+<div class="header">
+  <h1>网络攻击检测系统 - 分析报告</h1>
+  <p>生成时间: {now} | 检测引擎: 特征匹配 + 异常行为分析</p>
+</div>
+
+<!-- 概览卡片 -->
+<div class="cards">
+  <div class="card {'critical' if severity_count.get(5,0) > 0 else 'high' if max_severity >= 4 else 'info'}">
+    <p class="num">{total_alerts}</p>
+    <p class="label">告警总数</p>
+  </div>
+  <div class="card info">
+    <p class="num">{total_traffic}</p>
+    <p class="label">流量记录</p>
+  </div>
+  <div class="card high">
+    <p class="num">{severity_count.get(4, 0) + severity_count.get(5, 0)}</p>
+    <p class="label">高危/严重告警</p>
+  </div>
+</div>
+
+<!-- 结论 -->
+<div class="section">
+  <h2>检测结论</h2>
+  <div class="conclusion {'clean' if max_severity <= 2 else ''}">
+    <strong>{conclusion}</strong>
+    {f'（{type_count}）' if max_severity > 0 else ''}
+  </div>
+</div>
+
+<!-- 攻击类型分布 -->
+<div class="section">
+  <h2>攻击类型分布</h2>
+  {''.join(f'''<div class="stat-bar">
+    <span class="bar-label">{t}</span>
+    <div class="bar-track"><div class="bar-fill" style="width:{max(5, c*100//max(type_count.values(), default=1))}%; background:#fa8c16">{c}</div></div>
+  </div>''' for t, c in sorted(type_count.items(), key=lambda x: -x[1])[:8])}
+</div>
+
+<!-- 严重度分布 -->
+<div class="section">
+  <h2>严重度分布</h2>
+  {''.join(f'''<div class="stat-bar">
+    <span class="bar-label">{sev_names[s]}</span>
+    <div class="bar-track"><div class="bar-fill" style="width:{max(5, severity_count[s]*100//max(total_alerts, 1))}%; background:{SEVERITY_COLORS.get(s, '#999')}">{severity_count[s]}</div></div>
+  </div>''' for s in (5, 4, 3, 2, 1) if severity_count.get(s, 0) > 0)}
+</div>
+
+<!-- 告警处理状态 -->
+<div class="section">
+  <h2>告警处理状态</h2>
+  {''.join(f'''<div class="stat-bar">
+    <span class="bar-label">{k}</span>
+    <div class="bar-track"><div class="bar-fill" style="width:{max(5, v*100//max(total_alerts, 1))}%; background:{'#f5222d' if k == '待处理' else '#1890ff' if k == '已确认' else '#52c41a' if k == '误报' else '#8c8c8c'}">{v}</div></div>
+  </div>''' for k, v in status_count.items() if v > 0)}
+</div>
+
+<!-- 流量协议分布 -->
+<div class="section">
+  <h2>流量协议分布（最近 {min(len(self._records), 2000)} 条）</h2>
+  {''.join(f'''<div class="stat-bar">
+    <span class="bar-label">{p}</span>
+    <div class="bar-track"><div class="bar-fill" style="width:{max(5, c*100//max(proto_dist.values(), default=1))}%; background:#1890ff">{c}</div></div>
+  </div>''' for p, c in sorted(proto_dist.items(), key=lambda x: -x[1])[:8])}
+</div>
+
+<!-- 告警明细表 -->
+<div class="section">
+  <h2>告警明细（最近 {min(total_alerts, 200)} 条）</h2>
+  <table>
+    <thead><tr><th>ID</th><th>时间</th><th>攻击类型</th><th>等级</th><th>来源</th><th>目标</th><th>描述</th><th>状态</th></tr></thead>
+    <tbody>{alert_rows or '<tr><td colspan="8" style="text-align:center;color:#999">暂无数据</td></tr>'}</tbody>
+  </table>
+</div>
+
+<div class="footer">
+  <p>网络攻击检测系统 &copy; 2026 | 自动生成，仅供参考</p>
+</div>
+
+</div>
+</body>
+</html>"""
+
     def _clear_alerts(self):
         for item in self._tree.get_children():
             self._tree.delete(item)
         self._alerts.clear()
+        self._alert_states.clear()
         self._alert_filter_ip = ""
         self._alert_filter_type = ""
         self._alert_filter_port = ""
@@ -759,6 +1098,299 @@ class MainWindow:
         """打开配置对话框"""
         ConfigDialog(self._root)
         self._status_text.set("配置已更新")
+
+    def _open_whitelist_dialog(self):
+        """打开白名单管理弹窗"""
+        dialog = tk.Toplevel(self._root)
+        dialog.title("白名单管理")
+        dialog.geometry("400x400")
+        dialog.transient(self._root)
+        dialog.grab_set()
+
+        # 说明文字
+        ttk.Label(dialog, text="白名单中的 IP 将被所有检测引擎忽略（不产生告警）",
+                  padding=(8, 6)).pack(anchor=tk.W)
+
+        # 列表（左侧大框）
+        list_frame = ttk.Frame(dialog)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+
+        listbox = tk.Listbox(list_frame, height=12, font=("Consolas", 10))
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=listbox.yview)
+        listbox.configure(yscrollcommand=scrollbar.set)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # 填充已有白名单
+        for ip in sorted(WHITELIST_IPS):
+            listbox.insert(tk.END, ip)
+
+        # 添加区域
+        add_frame = ttk.Frame(dialog)
+        add_frame.pack(fill=tk.X, padx=8, pady=4)
+
+        ttk.Label(add_frame, text="IP 地址:").pack(side=tk.LEFT, padx=(0, 4))
+        ip_entry = ttk.Entry(add_frame, width=20)
+        ip_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+
+        def add_ip():
+            ip = ip_entry.get().strip()
+            if not ip:
+                return
+            if ip in WHITELIST_IPS:
+                self._status_text.set(f"IP {ip} 已在白名单中")
+                return
+            WHITELIST_IPS.append(ip)
+            listbox.insert(tk.END, ip)
+            ip_entry.delete(0, tk.END)
+            self._status_text.set(f"已添加白名单: {ip}")
+            logger.info(f"白名单添加: {ip}")
+
+        def delete_ip():
+            selection = listbox.curselection()
+            if not selection:
+                return
+            idx = selection[0]
+            ip = listbox.get(idx)
+            if ip in WHITELIST_IPS:
+                WHITELIST_IPS.remove(ip)
+            listbox.delete(idx)
+            self._status_text.set(f"已移除白名单: {ip}")
+            logger.info(f"白名单移除: {ip}")
+
+        ttk.Button(add_frame, text="添加", command=add_ip, width=6).pack(side=tk.LEFT, padx=2)
+        ttk.Button(add_frame, text="删除选中", command=delete_ip, width=8).pack(side=tk.LEFT, padx=2)
+
+        # IP 也可以从 GUI 已知 IP 中快速选择
+        if self._known_ips:
+            quick_frame = ttk.Frame(dialog)
+            quick_frame.pack(fill=tk.X, padx=8, pady=(8, 4))
+            ttk.Label(quick_frame, text="快速添加（已出现在流量中）:").pack(anchor=tk.W)
+
+            # 过滤掉已经在白名单中的
+            candidates = sorted(self._known_ips - set(WHITELIST_IPS))
+            if candidates:
+                quick_var = tk.StringVar()
+                quick_cb = ttk.Combobox(quick_frame, textvariable=quick_var,
+                                        values=candidates, width=18, state="readonly")
+                quick_cb.pack(side=tk.LEFT, padx=(0, 4))
+
+                def quick_add():
+                    ip = quick_var.get()
+                    if ip and ip not in WHITELIST_IPS:
+                        WHITELIST_IPS.append(ip)
+                        listbox.insert(tk.END, ip)
+                        quick_cb["values"] = sorted(self._known_ips - set(WHITELIST_IPS))
+                        self._status_text.set(f"已添加白名单: {ip}")
+                        logger.info(f"白名单添加: {ip}")
+
+                ttk.Button(quick_frame, text="加入白名单", command=quick_add, width=10).pack(side=tk.LEFT)
+            else:
+                ttk.Label(quick_frame, text="（所有已知 IP 已在白名单中）", foreground="#999").pack(anchor=tk.W)
+
+        # 关闭按钮
+        ttk.Button(dialog, text="关闭", command=dialog.destroy, width=10).pack(pady=8)
+
+    def _open_help_dialog(self):
+        """打开使用帮助弹窗（多标签页）"""
+        dialog = tk.Toplevel(self._root)
+        dialog.title("使用帮助")
+        dialog.geometry("600x480")
+        dialog.transient(self._root)
+        dialog.grab_set()
+
+        notebook = ttk.Notebook(dialog)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        # ---- Tab 1: 快速开始 ----
+        tab1 = ttk.Frame(notebook)
+        notebook.add(tab1, text="快速开始")
+        t1 = tk.Text(tab1, wrap=tk.WORD, font=("", 10), padx=10, pady=8,
+                     relief=tk.FLAT, bg=self._root.cget("bg"))
+        t1.pack(fill=tk.BOTH, expand=True)
+        t1.insert("1.0", """\
+【快速开始】
+
+1. 模拟演示（无需管理员权限）
+   python tests/live_demo.py
+
+2. 实时抓包检测（需管理员 + Npcap）
+   python main.py --auto
+
+3. 离线 PCAP 分析
+   python main.py --pcap 文件路径.pcap --auto
+
+4. 普通 GUI 模式（手动点"开始检测"）
+   python main.py
+
+5. 运行集成测试
+   python tests/quick_test.py
+
+【环境要求】
+- Python 3.8+
+- Npcap/WinPcap（Windows 实时抓包需要）
+- 无额外 pip 依赖（仅用内置库 tkinter/threading/json）
+""")
+        t1.configure(state=tk.DISABLED)
+
+        # ---- Tab 2: 界面指南 ----
+        tab2 = ttk.Frame(notebook)
+        notebook.add(tab2, text="界面指南")
+        t2 = tk.Text(tab2, wrap=tk.WORD, font=("", 10), padx=10, pady=8,
+                     relief=tk.FLAT, bg=self._root.cget("bg"))
+        t2.pack(fill=tk.BOTH, expand=True)
+        t2.insert("1.0", """\
+【界面布局】
+
+┌─────────────────────────────────────────────┐
+│  [▶ 开始检测] [■ 停止检测] [↺ 重置]  ● 状态 │  ← 控制栏
+├──────────────────────┬──────────────────────┤
+│  ┌ 告警列表 ┐  ┌ 正常流量 ┐  │   统计面板      │
+│  │筛选栏    │  │筛选栏    │   │   ● 告警总数    │
+│  │IP 类型 端口│  │IP 协议 端口│  │   ● 攻击类型   │
+│  │[筛选][清除]│  │[筛选][清除]│  │   ● 严重度分…  │
+│  │          │  │          │   │   ● 攻击链     │
+│  │  ID 时间  │  │  # 协议   │   │               │
+│  │  类型 …   │  │  来源 …   │   │               │
+│  └──────────┘  └──────────┘  └───────────────┤
+├──────────────────────────────────────────────┤
+│  就绪                      运行时间: 00:00:00 │  ← 状态栏
+└──────────────────────────────────────────────┘
+
+【告警列表标签页】
+- 显示所有检测到的攻击告警（特征匹配 + 异常检测）
+- 按严重度着色：蓝(信息) 绿(低) 黄(中) 橙(高) 红(严重)
+- 双击某行可查看详细信息
+- 右键可标记状态、添加备注
+
+【正常流量标签页】
+- 显示所有通过检测的流量记录
+- 按协议着色：蓝(TCP) 绿(UDP) 橙(HTTP) 紫(DNS)
+- 同样支持 IP/协议/端口组合筛选
+
+【统计面板（右侧）】
+- 实时显示告警总数、攻击类型分布、严重度分布
+""")
+        t2.configure(state=tk.DISABLED)
+
+        # ---- Tab 3: 筛选与标记 ----
+        tab3 = ttk.Frame(notebook)
+        notebook.add(tab3, text="筛选与标记")
+        t3 = tk.Text(tab3, wrap=tk.WORD, font=("", 10), padx=10, pady=8,
+                     relief=tk.FLAT, bg=self._root.cget("bg"))
+        t3.pack(fill=tk.BOTH, expand=True)
+        t3.insert("1.0", """\
+【筛选功能】
+
+每个标签页顶部都有筛选栏，三个条件可任意组合：
+
+  IP: [________▼]  类型/协议: [全部 ▼]  端口: [______▼]  [筛选] [清除]
+
+- IP 和端口支持下拉建议（自动收集出现过的值）
+- 可手动输入部分匹配
+- 点击"清除"恢复显示全部
+
+【告警处理状态】
+
+右键点击告警行 → 弹出菜单：
+
+  ▸ 修改状态  →  待处理 / 已确认 / 误报 / 已忽略
+  ▸ 编辑备注... → 弹出文本框输入自由备注
+
+- 状态和备注随告警持久化（运行期间）
+- 清空告警列表会同时清空状态
+- 导出的 HTML 报告会包含处理状态统计
+
+【滚动行为】
+- 滚动条在底部时：新数据自动跟随
+- 向上滚动后：停留在当前位置，不受新数据干扰
+""")
+        t3.configure(state=tk.DISABLED)
+
+        # ---- Tab 4: 白名单与配置 ----
+        tab4 = ttk.Frame(notebook)
+        notebook.add(tab4, text="白名单与配置")
+        t4 = tk.Text(tab4, wrap=tk.WORD, font=("", 10), padx=10, pady=8,
+                     relief=tk.FLAT, bg=self._root.cget("bg"))
+        t4.pack(fill=tk.BOTH, expand=True)
+        t4.insert("1.0", """\
+【白名单管理】
+
+菜单：配置 → 白名单管理...
+
+白名单中的 IP 将被所有检测引擎忽略——流量正常统计更新基线，
+但不会产生任何告警。
+
+适用场景：
+  - 网关/路由器（如 192.168.1.1）
+  - DNS 服务器（如 10.0.0.53）
+  - 打印机/门禁等物联网设备
+  - 已知的安全扫描器 IP
+
+操作方式：
+  1. 手动输入 IP → 点击"添加"
+  2. 从"快速添加"下拉框选择（已出现在流量中的 IP）
+  3. 选中列表项 → "删除选中" 移除
+
+添加/删除即时生效，无需重启检测。
+
+【检测阈值】
+
+菜单：配置 → 检测阈值设置...
+
+可调整各类攻击的检测灵敏度。如果你在真实环境中遇到
+大量误报，可以适当调高阈值。
+
+真实环境 vs 测试环境使用不同的默认阈值：
+  - main.py 启动：使用高阈值（减少误报）
+  - tests/live_demo.py：使用低阈值（方便演示）
+""")
+        t4.configure(state=tk.DISABLED)
+
+        # ---- Tab 5: 导出报告 ----
+        tab5 = ttk.Frame(notebook)
+        notebook.add(tab5, text="导出报告")
+        t5 = tk.Text(tab5, wrap=tk.WORD, font=("", 10), padx=10, pady=8,
+                     relief=tk.FLAT, bg=self._root.cget("bg"))
+        t5.pack(fill=tk.BOTH, expand=True)
+        t5.insert("1.0", """\
+【数据导出】
+
+菜单：文件 →
+
+  ▸ 导出告警 CSV...
+     导出告警列表为 CSV 文件（可用 Excel 打开）
+     包含：ID、时间、攻击类型、等级、来源/目标、描述、建议
+
+  ▸ 导出告警 TXT...
+     导出可读的文本格式日志
+
+  ▸ 导出报告 HTML...
+     生成一份完整的分析报告 HTML 文件，包含：
+     - 概览卡片（告警总数 / 流量 / 高危数）
+     - 检测结论（自动判定最高严重度）
+     - 攻击类型分布条形图
+     - 严重度分布条形图
+     - 告警处理状态统计
+     - 流量协议分布
+     - 告警明细表（最近 200 条）
+     无需外部依赖，浏览器直接打开。
+
+【流量包下载】
+
+双击流量行 → 弹出详情 → 点击"下载"按钮
+- 有原始载荷 → 导出为 .bin 二进制文件
+- 无载荷 → 导出为 .json 结构化数据
+
+【其他操作】
+
+  ▸ 清空告警列表 — 清除表格显示 + 处理状态
+  ▸ 清空流量列表 — 仅清除流量记录
+  ▸ ↺ 重置统计 — 同时清空所有数据并通知引擎重置
+""")
+        t5.configure(state=tk.DISABLED)
+
+        ttk.Button(dialog, text="关闭", command=dialog.destroy, width=10).pack(pady=8)
 
     def _show_about(self):
         messagebox.showinfo(

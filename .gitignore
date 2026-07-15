@@ -6,6 +6,9 @@ __pycache__/
 dist/
 build/
 
+# PyInstaller
+*.spec
+
 # 虚拟环境
 venv/
 .venv/
@@ -30,3 +33,7 @@ Thumbs.db
 
 # 环境变量
 .env
+
+# 测试产物
+tests/__pycache__/
+.pytest_cache/
