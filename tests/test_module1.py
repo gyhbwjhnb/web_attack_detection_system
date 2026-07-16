@@ -47,7 +47,9 @@ check("src.mac",     rec.src.mac, "aa:bb:cc:dd:ee:ff")
 check("dst.ip",      rec.dst.ip, "10.0.0.1")
 check("dst.port",    rec.dst.port, 80)
 check("dst.mac",     rec.dst.mac, "00:11:22:33:44:55")
-check("protocol",    rec.protocol, ProtocolType.HTTP)
+# 修复后：protocol 保留传输层 TCP，不覆盖为 HTTP
+check("protocol_tcp", rec.protocol, ProtocolType.TCP)
+check("proto_detail", "HTTP" in rec.protocol_detail, True)
 check("http_method", rec.http_method, "GET")
 check("http_host",   rec.http_host, "10.0.0.1")
 check("http_uri",    rec.http_uri, "/index.php?id=1' OR 1=1")  # URL 已解码
@@ -88,7 +90,8 @@ print("=" * 50)
 pkt3 = IP(src="10.0.0.99", dst="192.168.1.1") / TCP(sport=44444, dport=22, flags="S")
 rec3 = parse_packet(pkt3)
 
-check("proto_ssh",    rec3.protocol, ProtocolType.SSH)  # 端口 22 标记为 SSH
+check("proto_tcp",    rec3.protocol, ProtocolType.TCP)  # 保留传输层 TCP
+check("detail_ssh",   rec3.protocol_detail, "SSH")   # 应用层标记存入 protocol_detail
 check("is_syn_true",  rec3.is_syn(), True)
 check("dst_port_22",  rec3.dst.port, 22)
 check("src_ip_scan",  rec3.src.ip, "10.0.0.99")
@@ -117,7 +120,8 @@ print("=" * 50)
 pkt_udp = IP(src="192.168.1.50", dst="192.168.1.1") / UDP(sport=9999, dport=53)
 rec_udp = parse_packet(pkt_udp)
 
-check("proto_udp",    rec_udp.protocol, ProtocolType.DNS)  # 端口 53 标记为 DNS
+check("proto_udp",    rec_udp.protocol, ProtocolType.UDP)  # 保留传输层 UDP
+check("detail_dns",   rec_udp.protocol_detail, "DNS")
 check("src_port",     rec_udp.src.port, 9999)
 check("dst_port_53",  rec_udp.dst.port, 53)
 print()
@@ -135,7 +139,8 @@ pkt4 = (
 )
 
 rec4 = parse_packet(pkt4)
-check("dns_proto",     rec4.protocol, ProtocolType.DNS)
+check("dns_proto_udp", rec4.protocol, ProtocolType.UDP)  # 保留传输层 UDP
+check("dns_detail",    "DNS" in rec4.protocol_detail, True)
 check("dns_query",     rec4.dns_query, "evil.malware.com")
 check("dns_qtype",     rec4.dns_query_type, "A")
 print()
@@ -207,7 +212,8 @@ dns_resp = (
     )
 )
 rec_dns = parse_packet(dns_resp)
-check("dns_response_proto", rec_dns.protocol, ProtocolType.DNS)
+check("dns_resp_proto_udp", rec_dns.protocol, ProtocolType.UDP)  # 保留传输层 UDP
+check("dns_resp_detail",    "DNS" in rec_dns.protocol_detail, True)
 check("dns_query_example",  rec_dns.dns_query, "example.com")
 check("dns_has_answers",    len(rec_dns.dns_answers) > 0, True)
 check("dns_answer_ip",      "93.184.216.34" in rec_dns.dns_answers, True)
@@ -257,7 +263,8 @@ print("测试13: to_dict / to_json 序列化")
 print("=" * 50)
 
 d = rec.to_dict()
-check("dict_proto",    d["protocol"], "HTTP")
+check("dict_proto_tcp", d["protocol"], "TCP")  # 修复后：序列化传输层协议
+check("dict_proto_detail", "HTTP" in d.get("protocol_detail", ""), True)
 check("dict_src_ip",   d["src"]["ip"], "192.168.1.100")
 check("no_payload_raw", "payload_raw" in d, False)
 j = rec.to_json()
@@ -307,23 +314,23 @@ print("=" * 50)
 # SMB (port 445)
 pkt_smb = IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=49152, dport=445, flags="S")
 rec_smb = parse_packet(pkt_smb)
-check("smb_proto",     rec_smb.protocol, ProtocolType.SMB)
-check("smb_detail",    "SMB" in rec_smb.protocol_detail, True)
+check("smb_proto_tcp",  rec_smb.protocol, ProtocolType.TCP)  # 保留传输层
+check("smb_detail",     "SMB" in rec_smb.protocol_detail, True)
 
 # RDP (port 3389)
 pkt_rdp = IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=49153, dport=3389, flags="S")
 rec_rdp = parse_packet(pkt_rdp)
-check("rdp_proto",     rec_rdp.protocol, ProtocolType.RDP)
+check("rdp_proto_tcp",  rec_rdp.protocol, ProtocolType.TCP)
 
 # MySQL (port 3306)
 pkt_mysql = IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=49154, dport=3306, flags="S")
 rec_mysql = parse_packet(pkt_mysql)
-check("mysql_proto",   rec_mysql.protocol, ProtocolType.MYSQL)
+check("mysql_proto_tcp", rec_mysql.protocol, ProtocolType.TCP)
 
 # Redis (port 6379)
 pkt_redis = IP(src="10.0.0.1", dst="10.0.0.2") / TCP(sport=49155, dport=6379, flags="S")
 rec_redis = parse_packet(pkt_redis)
-check("redis_proto",   rec_redis.protocol, ProtocolType.REDIS)
+check("redis_proto_tcp", rec_redis.protocol, ProtocolType.TCP)
 
 print()
 

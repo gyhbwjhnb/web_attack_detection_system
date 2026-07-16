@@ -294,46 +294,39 @@ def _detect_application_protocol(record: TrafficRecord, packet=None):
     if payload and _detect_tls(record):
         return
 
-    # 端口的 HTTPS 猜测（仅在 TLS 内容检测未命中时使用）
+    # 端口 443/80 回退标记（仅在 TLS 内容检测未命中时使用）
     if record.dst.port == 443 or record.src.port == 443:
-        if record.protocol == ProtocolType.UNKNOWN or record.protocol == ProtocolType.TCP:
-            record.protocol = ProtocolType.HTTPS
+        if not record.protocol_detail:
             record.protocol_detail = "HTTPS/TLS"
     elif record.dst.port == 80 or record.src.port == 80:
-        if record.protocol == ProtocolType.UNKNOWN or record.protocol == ProtocolType.TCP:
-            record.protocol = ProtocolType.HTTP
+        if not record.protocol_detail:
             record.protocol_detail = "HTTP"
 
 
 def _mark_port_protocol(record: TrafficRecord):
-    """基于端口的协议标记（适用于无载荷或无法内容识别的包）"""
+    """基于端口的协议标记（适用于无载荷或无法内容识别的包）
+
+    注意：只设置 protocol_detail，不覆盖 record.protocol（保留传输层协议）。
+    """
     port = record.dst.port or record.src.port
 
     # 远程管理/漏洞利用类
     if port in (22,):
-        record.protocol = ProtocolType.SSH
         record.protocol_detail = "SSH"
     elif port in (21,):
-        record.protocol = ProtocolType.FTP
         record.protocol_detail = "FTP"
     elif port in (25,):
-        record.protocol = ProtocolType.SMTP
         record.protocol_detail = "SMTP"
     elif port in (3389,):
-        record.protocol = ProtocolType.RDP
         record.protocol_detail = "RDP"
     elif port in (445, 139):
-        record.protocol = ProtocolType.SMB
         record.protocol_detail = f"SMB (port {port})"
     # 数据库类
     elif port in (3306, 3307):
-        record.protocol = ProtocolType.MYSQL
         record.protocol_detail = "MySQL"
     elif port in (6379, 6380):
-        record.protocol = ProtocolType.REDIS
         record.protocol_detail = "Redis"
     elif port in (27017, 27018):
-        record.protocol = ProtocolType.MONGODB
         record.protocol_detail = "MongoDB"
 
 
@@ -363,8 +356,11 @@ def _parse_http(record: TrafficRecord):
 
     请求示例:  GET /index.php?id=1 HTTP/1.1
     响应示例:  HTTP/1.1 200 OK
+
+    注意：不覆盖 record.protocol（保留传输层协议 TCP），
+    应用层协议信息通过 protocol_detail 和各 HTTP 字段传递。
     """
-    record.protocol = ProtocolType.HTTP
+    record.protocol_detail = record.protocol_detail or "HTTP"
     lines = record.payload.split("\r\n")
     if not lines:
         lines = record.payload.split("\n")
@@ -423,8 +419,12 @@ def _parse_http(record: TrafficRecord):
 
 
 def _parse_dns(record: TrafficRecord):
-    """解析 DNS 协议，提取查询域名和响应资源记录"""
-    record.protocol = ProtocolType.DNS
+    """解析 DNS 协议，提取查询域名和响应资源记录
+
+    注意：不覆盖 record.protocol（保留传输层协议 UDP），
+    应用层协议名称存入 protocol_detail。
+    """
+    record.protocol_detail = record.protocol_detail or "DNS"
     try:
         raw = record.payload_raw
         if len(raw) < 12:
@@ -485,9 +485,13 @@ def _parse_dns(record: TrafficRecord):
 
 
 def _parse_dns_from_scapy(dns_layer, record: TrafficRecord):
-    """从 scapy 的 DNS 层提取信息（用于 IP/UDP/DNS 结构）"""
+    """从 scapy 的 DNS 层提取信息（用于 IP/UDP/DNS 结构）
+
+    注意：不覆盖 record.protocol（保留传输层协议 UDP），
+    应用层协议名称存入 protocol_detail。
+    """
     try:
-        record.protocol = ProtocolType.DNS
+        record.protocol_detail = record.protocol_detail or "DNS"
         # 查询域名
         if hasattr(dns_layer, 'qd') and dns_layer.qd:
             qd = dns_layer.qd
@@ -596,7 +600,6 @@ def _detect_tls(record: TrafficRecord) -> bool:
     # TLS 记录层: ContentType(1) + Version(2) + Length(2)
     content_type = raw[0]
     if content_type == 0x16:  # 22 = Handshake
-        record.protocol = ProtocolType.TLS
         # TLS 版本（记录层版本）
         if len(raw) >= 3:
             ver_map = {
@@ -616,7 +619,6 @@ def _detect_tls(record: TrafficRecord) -> bool:
         return True
 
     elif content_type == 0x17:  # 23 = Application Data (加密数据)
-        record.protocol = ProtocolType.TLS
         if len(raw) >= 3:
             ver = (raw[1], raw[2])
             if ver in ((0x03, 0x01), (0x03, 0x02), (0x03, 0x03), (0x03, 0x04)):
