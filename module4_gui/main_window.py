@@ -406,8 +406,9 @@ class MainWindow:
         if not children:
             return True
         bbox = tree.bbox(children[-1])
-        if bbox is None:
-            return False  # 最后一个 item 不可见 → 不在底部
+        # bbox 在 item 未渲染时为 "" 或 None
+        if not bbox:
+            return False
         tree_height = tree.winfo_height()
         return bbox[1] + bbox[3] <= tree_height + 2  # 2px 容差
 
@@ -1644,6 +1645,74 @@ class MainWindow:
   ▸ ↺ 重置统计 — 同时清空所有数据并通知引擎重置
 """)
         t5.configure(state=tk.DISABLED)
+
+        # ---- Tab 6: 自定义规则 ----
+        tab6 = ttk.Frame(notebook)
+        notebook.add(tab6, text="自定义规则")
+        t6 = tk.Text(tab6, wrap=tk.WORD, font=("Consolas", 10), padx=10, pady=8,
+                     relief=tk.FLAT, bg=self._root.cget("bg"))
+        t6.pack(fill=tk.BOTH, expand=True)
+        t6.insert("1.0", """\
+【自定义规则指南】
+
+═══════════════════════════════════════════════
+
+  ■ 规则文件位置
+    data/rules/  目录下的任意 .json 文件
+
+  ■ 导入方式
+    · 菜单"配置 → 导入自定义规则..."选择 .json 文件
+    · 或直接复制 .json 文件到 data/rules/ 目录
+
+  ■ 热加载
+    放入 data/rules/ 目录的规则文件会在 3 秒内自动生效
+    无需重启程序！
+
+═══════════════════════════════════════════════
+
+  ■ 规则 JSON 格式（必需字段）:
+
+  {
+    "rule_id":     "CUSTOM-001",
+    "attack_name": "SQL注入尝试",
+    "attack_type": "sql_injection",
+    "pattern":     "(?i)('\\s*or\\s+'|union\\s+select)",
+    "severity":    3,
+    "description": "检测到SQL注入特征",
+    "protocol":    "TCP",
+    "dst_port":    80
+  }
+
+  ■ 字段说明:
+    rule_id     — 唯一标识，建议 CUSTOM-XXX 格式
+    attack_name — 告警标题
+    attack_type — 攻击分类（自定义或复用已有分类）
+    pattern     — 正则表达式（(?i) 表示忽略大小写）
+    severity    — 严重度 1-5（1信息 2低 3中 4高 5严重）
+    description — 告警详情描述
+    protocol    — 协议 TCP/UDP（可选，不填匹配所有）
+    dst_port    — 目标端口（可选，不填匹配所有）
+    src_port    — 源端口（可选）
+
+  ■ 多条规则格式:
+  [
+    { "rule_id": "XSS-001", "pattern": "<script>", ... },
+    { "rule_id": "SQL-001", "pattern": "union select", ... }
+  ]
+
+  ■ 正则示例:
+    检测目录遍历:  "(?i)(\\.\\./|\\.\\.\\\\)"
+    检测XSS:       "<script[^>]*>.*?</script>"
+    检测CVE利用:   "(?i)User-Agent:.*\\$\\(.*\\).*"
+    检测一句话木马: "(?<=[a-zA-Z]=)@eval\\(.*\\)"
+
+═══════════════════════════════════════════════
+
+  ■ 验证规则:
+    放入文件后 → 观察控制台输出:
+    "检测到规则变更，已重新加载 N 条规则"
+""")
+        t6.configure(state=tk.DISABLED)
 
         ttk.Button(dialog, text="关闭", command=dialog.destroy, width=10).pack(pady=8)
 

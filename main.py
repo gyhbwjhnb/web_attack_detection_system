@@ -58,9 +58,14 @@ class NIDSApp:
         # ---- 模块2: 特征匹配检测（独立于模块3，并行处理） ----
         from module2_signature import SignatureEngine, connect as sig_connect
         self._signature = SignatureEngine()
-        loaded = self._signature.load_rules("data/signatures.json")
-        logger.info(f"模块2 加载 {loaded} 条特征规则")
-        print(f"[系统] 模块2 特征引擎已就绪，加载 {loaded} 条规则")
+        # 使用热加载模式：从 data/rules/ 目录加载规则，文件变化自动重载
+        loaded = self._signature.load_rules_with_hot_reload(
+            rules_dir="data/rules/",
+            rule_file="data/signatures.json",
+            hot_reload=True,
+        )
+        logger.info(f"模块2 加载 {loaded} 条特征规则（热加载已启用）")
+        print(f"[系统] 模块2 特征引擎已就绪，加载 {loaded} 条规则（data/rules/ 目录监听中）")
         sig_connect(self._signature)
 
         # ---- 模块3: 异常检测（订阅 TrafficRecord） ----

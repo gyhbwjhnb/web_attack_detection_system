@@ -1,0 +1,342 @@
+[
+  {
+    "rule_id": "SQL-001",
+    "attack_name": "SQL注入 - OR 1=1 经典绕过",
+    "attack_type": "sql_injection",
+    "pattern": "' OR 1=1",
+    "severity": 5,
+    "description": "检测经典 OR 1=1 SQL注入绕过尝试",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "SQL-002",
+    "attack_name": "SQL注入 - OR '1'='1'",
+    "attack_type": "sql_injection",
+    "pattern": "OR '1'='1'",
+    "severity": 5,
+    "description": "检测 OR '1'='1' SQL注入",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "SQL-003",
+    "attack_name": "SQL注入 - UNION SELECT 联合查询",
+    "attack_type": "sql_injection",
+    "pattern": "UNION SELECT",
+    "severity": 5,
+    "description": "检测 UNION SELECT 联合查询注入",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "SQL-004",
+    "attack_name": "SQL注入 - 注释符 --",
+    "attack_type": "sql_injection",
+    "pattern": "--",
+    "severity": 4,
+    "description": "检测 SQL 注释符绕过",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "SQL-005",
+    "attack_name": "SQL注入 - xp_cmdshell 存储过程",
+    "attack_type": "sql_injection",
+    "pattern": "xp_cmdshell",
+    "severity": 5,
+    "description": "检测尝试调用 xp_cmdshell 执行系统命令",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "SQL-006",
+    "attack_name": "SQL注入 - 1=1 永真条件",
+    "attack_type": "sql_injection",
+    "pattern": "1=1",
+    "severity": 4,
+    "description": "检测永真条件 SQL 注入",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "XSS-001",
+    "attack_name": "XSS - script 标签注入",
+    "attack_type": "xss",
+    "pattern": "<script>",
+    "severity": 4,
+    "description": "检测 <script> 标签注入的 XSS 攻击",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "XSS-002",
+    "attack_name": "XSS - </script> 闭合标签",
+    "attack_type": "xss",
+    "pattern": "</script>",
+    "severity": 4,
+    "description": "检测 script 闭合标签 XSS",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "XSS-003",
+    "attack_name": "XSS - javascript: 伪协议",
+    "attack_type": "xss",
+    "pattern": "javascript:",
+    "severity": 4,
+    "description": "检测 javascript: 伪协议 XSS",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "XSS-004",
+    "attack_name": "XSS - onerror 事件处理",
+    "attack_type": "xss",
+    "pattern": "onerror=",
+    "severity": 4,
+    "description": "检测 onerror 事件处理器 XSS",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "XSS-005",
+    "attack_name": "XSS - onload 事件处理",
+    "attack_type": "xss",
+    "pattern": "onload=",
+    "severity": 4,
+    "description": "检测 onload 事件处理器 XSS",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "XSS-006",
+    "attack_name": "XSS - alert 弹窗",
+    "attack_type": "xss",
+    "pattern": "alert(",
+    "severity": 3,
+    "description": "检测 XSS 常用 alert 弹窗",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "XSS-007",
+    "attack_name": "XSS - document.cookie 窃取",
+    "attack_type": "xss",
+    "pattern": "document.cookie",
+    "severity": 4,
+    "description": "检测尝试窃取 cookie 的 XSS",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "CMD-001",
+    "attack_name": "命令注入 - cmd.exe 执行",
+    "attack_type": "command_injection",
+    "pattern": "cmd.exe",
+    "severity": 5,
+    "description": "检测尝试调用 cmd.exe 的命令注入攻击",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "CMD-002",
+    "attack_name": "命令注入 - /bin/sh shell 调用",
+    "attack_type": "command_injection",
+    "pattern": "/bin/sh",
+    "severity": 5,
+    "description": "检测尝试调用 /bin/sh 的命令注入",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "CMD-003",
+    "attack_name": "命令注入 - /bin/bash shell 调用",
+    "attack_type": "command_injection",
+    "pattern": "/bin/bash",
+    "severity": 5,
+    "description": "检测尝试调用 /bin/bash 的命令注入",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "CMD-004",
+    "attack_name": "命令注入 - cat /etc/passwd 读取",
+    "attack_type": "command_injection",
+    "pattern": "cat /etc/passwd",
+    "severity": 5,
+    "description": "检测尝试读取 /etc/passwd 的命令注入",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "CMD-005",
+    "attack_name": "命令注入 - 管道符 |",
+    "attack_type": "command_injection",
+    "pattern": "|",
+    "severity": 4,
+    "description": "检测管道符命令注入尝试",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "CMD-006",
+    "attack_name": "命令注入 - 分号 ; 拼接",
+    "attack_type": "command_injection",
+    "pattern": "; ls",
+    "severity": 4,
+    "description": "检测分号拼接的命令注入",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "PATH-001",
+    "attack_name": "路径遍历 - ../ 回溯",
+    "attack_type": "path_traversal",
+    "pattern": "../",
+    "severity": 4,
+    "description": "检测目录回溯路径遍历攻击",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "PATH-002",
+    "attack_name": "路径遍历 - Windows ..\\ 回溯",
+    "attack_type": "path_traversal",
+    "pattern": "..\\",
+    "severity": 4,
+    "description": "检测 Windows 风格目录回溯",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "PATH-003",
+    "attack_name": "路径遍历 - etc/passwd",
+    "attack_type": "path_traversal",
+    "pattern": "/etc/passwd",
+    "severity": 4,
+    "description": "检测尝试读取密码文件",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "LFI-001",
+    "attack_name": "文件包含 - 包含 PHP 文件",
+    "attack_type": "lfi",
+    "pattern": "include(",
+    "severity": 5,
+    "description": "检测本地文件包含攻击",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "WEBSHELL-001",
+    "attack_name": "WebShell - 一句话木马 eval",
+    "attack_type": "webshell",
+    "pattern": "eval(",
+    "severity": 5,
+    "description": "检测 eval 一句话木马",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "WEBSHELL-002",
+    "attack_name": "WebShell - 一句话木马 system",
+    "attack_type": "webshell",
+    "pattern": "system(",
+    "severity": 5,
+    "description": "检测 system 一句话木马",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "WEBSHELL-003",
+    "attack_name": "WebShell - assert 后门",
+    "attack_type": "webshell",
+    "pattern": "assert(",
+    "severity": 5,
+    "description": "检测 assert 后门",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "C2-001",
+    "attack_name": "C2通信 -反弹 Shell 特征",
+    "attack_type": "reverse_shell",
+    "pattern": "/dev/tcp/",
+    "severity": 5,
+    "description": "检测反弹 Shell C2 通信特征",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "C2-002",
+    "attack_name": "C2通信 - nc 反弹 Shell",
+    "attack_type": "reverse_shell",
+    "pattern": "nc -e",
+    "severity": 5,
+    "description": "检测 nc -e 反弹 Shell",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "C2-003",
+    "attack_name": "C2通信 - bash 反弹 Shell",
+    "attack_type": "reverse_shell",
+    "pattern": "bash -i",
+    "severity": 5,
+    "description": "检测 bash -i 反弹 Shell",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "C2-004",
+    "attack_name": "恶意软件 - 常见 C2 域名后缀",
+    "attack_type": "malware_c2",
+    "pattern": ".top",
+    "severity": 3,
+    "description": "检测可疑的 C2 域名后缀（需要结合上下文判断）",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "BRUTE-001",
+    "attack_name": "暴力破解 - 登录失败提示",
+    "attack_type": "brute_force",
+    "pattern": "Login failed",
+    "severity": 3,
+    "description": "检测登录失败消息，配合频次判断暴力破解",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "BRUTE-002",
+    "attack_name": "暴力破解 - 密码错误提示",
+    "attack_type": "brute_force",
+    "pattern": "password incorrect",
+    "severity": 3,
+    "description": "检测密码错误消息",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "BRUTE-003",
+    "attack_name": "暴力破解 - 无效用户名",
+    "attack_type": "brute_force",
+    "pattern": "Invalid username",
+    "severity": 3,
+    "description": "检测无效用户名提示",
+    "protocol": "TCP",
+    "dst_port": 0
+  },
+  {
+    "rule_id": "DNS-001",
+    "attack_name": "DNS隧道 - 异常长域名",
+    "attack_type": "dns_tunnel",
+    "pattern": ".nip.io",
+    "severity": 3,
+    "description": "检测可能的 DNS 隧道域名",
+    "protocol": "UDP",
+    "dst_port": 53
+  }
+]

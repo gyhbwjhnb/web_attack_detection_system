@@ -60,6 +60,9 @@ class SignatureEngine(ISignatureEngine):
     """
 
     def __init__(self):
+        # --- 项目根目录（解析相对路径用） ---
+        self._project_root = Path(__file__).resolve().parent.parent
+
         # --- 规则与匹配器 ---
         self._rules: Dict[str, SignatureRule] = {}  # rule_id -> SignatureRule
         self._matcher = AhoCorasickMatcher(case_sensitive=False, url_decode=True)
@@ -120,6 +123,9 @@ class SignatureEngine(ISignatureEngine):
             rule_file = SIGNATURE_CONFIG.get("rules_file", "data/signatures.json")
 
         filepath = Path(str(rule_file))
+        # 相对路径 → 基于项目根目录解析
+        if not filepath.is_absolute():
+            filepath = self._project_root / filepath
         if not filepath.exists():
             logger.warning("规则路径不存在: %s", rule_file)
             return 0
@@ -287,6 +293,12 @@ class SignatureEngine(ISignatureEngine):
         """
         d = rules_dir or "data/rules/"
         f = rule_file or SIGNATURE_CONFIG.get("rules_file", "data/signatures.json")
+
+        # 相对路径 → 基于项目根目录解析（main.py 所在目录）
+        if not Path(d).is_absolute():
+            d = str(self._project_root / d)
+        if not Path(f).is_absolute():
+            f = str(self._project_root / f)
 
         # 优先从文件夹加载
         dir_path = Path(d)
