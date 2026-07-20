@@ -98,6 +98,7 @@ class MainWindow:
         self._on_start: Optional[Callable[[], None]] = None
         self._on_stop: Optional[Callable[[], None]] = None
         self._import_rules_callback: Optional[Callable[[str], None]] = None
+        self._on_alert_ignored: Optional[Callable[[dict], None]] = None
 
         # ---- 构建界面 ----
         self._build_menu()
@@ -633,6 +634,10 @@ class MainWindow:
         """注册导入规则回调（参数为所选 JSON 文件路径）"""
         self._import_rules_callback = callback
 
+    def set_on_alert_ignored(self, callback: Callable[[dict], None]):
+        """注册告警忽略回调（用户标记误报时触发，参数为 alert 摘要 dict）"""
+        self._on_alert_ignored = callback
+
     def run(self):
         """启动 GUI 主循环（阻塞）"""
         self._root.mainloop()
@@ -755,6 +760,21 @@ class MainWindow:
 
         self._status_text.set(f"告警状态已更新: {status}")
         logger.info(f"告警 {alert_id[:8]} 状态 → {status}")
+
+        # ★ 用户标记误报/已忽略 → 通知自学习抑制器
+        if status in ("误报", "已忽略") and self._on_alert_ignored:
+            try:
+                alert_data = self._alert_states.get(alert_id, {})
+                self._on_alert_ignored({
+                    "alert_id": alert_id,
+                    "src_ip": values[4] if len(values) > 4 else "",
+                    "attack_type": values[2] if len(values) > 2 else "",
+                    "dst_port": int(values[6]) if len(values) > 6 and values[6].isdigit() else 0,
+                    "status": status,
+                    "timestamp": time.time(),
+                })
+            except Exception:
+                pass  # 静默，不影响主流程
 
     def _edit_alert_note(self, alert_id: str, row_id: str):
         """弹窗编辑告警备注"""

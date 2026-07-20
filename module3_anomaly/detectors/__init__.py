@@ -16,15 +16,21 @@ from .lateral_movement import LateralMovementDetector
 from .syn_flood import SynFloodDetector
 from .bandwidth_anomaly import BandwidthAnomalyDetector
 from .behavioral_deviation import BehavioralDeviationDetector
+from .time_profile import TimeProfileDetector
+from .confidence_scorer import ConfidenceScorer
+from .suppression_learner import SuppressionLearner
 
 # 注册所有内置检测器（按优先级排序，AnomalyEngine 启动时加载）
 _ALL_DETECTORS = [
     PortScanDetector(),
+    TimeProfileDetector(),
     LateralMovementDetector(),
     BruteForceDetector(),
     SynFloodDetector(),
     AbnormalOutboundDetector(),
     BandwidthAnomalyDetector(),
+    ConfidenceScorer(),
+    SuppressionLearner(),
     BehavioralDeviationDetector(),
 ]
 

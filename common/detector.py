@@ -146,6 +146,16 @@ class IDetector(ABC):
         """统计重置时调用"""
         pass
 
+    def post_process_batch(self, alerts: List[Alert]) -> List[Alert]:
+        """
+        可选：对当前批次所有告警进行后处理（如置信度评分、关联补充）。
+        在所有检测器的 process() 执行完毕后调用，接收并返回修改后的告警列表。
+
+        Returns:
+            处理后的告警列表（原样返回或修改后返回）
+        """
+        return alerts
+
     def get_statistics(self) -> Optional[Dict]:
         """
         返回检测器自身的统计信息（可选）。

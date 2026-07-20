@@ -396,6 +396,15 @@ class AnomalyEngine(IAnomalyEngine):
             except Exception as e:
                 logger.error(f"检测器 {detector.name} 异常: {e}")
 
+        # ---- ★ 后处理阶段（置信度评分、告警增强） ----
+        for detector in self._detectors:
+            if not detector.enabled:
+                continue
+            try:
+                alerts = detector.post_process_batch(alerts)
+            except Exception as e:
+                logger.error(f"检测器 {detector.name} 后处理异常: {e}")
+
         # ---- 降噪 ----
         if self._config.get("enable_noise_reduction", True):
             min_sev = self._config.get("noise_min_severity", 3)

@@ -53,6 +53,7 @@ class NIDSApp:
         self._gui.set_on_start(lambda: self._start_capture(interface, pcap_file, bpf_filter))
         self._gui.set_on_stop(lambda: self._stop_capture())
         self._gui.set_on_import_rules(lambda path: self._import_rules(path))
+        self._gui.set_on_alert_ignored(lambda data: self._on_alert_ignored(data))
 
         # ---- 模块2: 特征匹配检测（独立于模块3，并行处理） ----
         from module2_signature import SignatureEngine, connect as sig_connect
@@ -143,6 +144,18 @@ class NIDSApp:
             logger.info(f"导入规则 {basename}，当前共 {count} 条规则")
         else:
             print(f"[系统] 规则文件已复制到 {dest}（下次启动生效）")
+
+    def _on_alert_ignored(self, alert_data: dict):
+        """用户标记告警为误报 → 通知自学习抑制器"""
+        if not self._anomaly:
+            return
+        try:
+            learner = self._anomaly.get_detector("suppression_learner")
+            if learner:
+                learner.on_user_ignore(alert_data)
+                logger.info(f"抑制学习: {alert_data.get('src_ip')} {alert_data.get('attack_type')}")
+        except Exception as e:
+            logger.debug(f"抑制学习通知异常: {e}")
 
     def run(self):
         """启动 GUI 主循环（阻塞）"""
