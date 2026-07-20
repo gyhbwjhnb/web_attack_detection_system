@@ -28,6 +28,7 @@
 """
 
 import json
+import os
 import time
 import threading
 from pathlib import Path
@@ -95,16 +96,22 @@ class SignatureEngine(ISignatureEngine):
         self._alerts_by_type: Dict[str, int] = {}
         self._traffic_processed: int = 0
 
+        # --- ★ 规则热加载 ----
+        self._rules_dir: Optional[str] = None
+        self._hot_reload_running = False
+        self._hot_reload_thread: Optional[threading.Thread] = None
+        self._rules_file_mtimes: Dict[str, float] = {}
+
     # ==================================================================
     # ISignatureEngine 接口实现
     # ==================================================================
 
     def load_rules(self, rule_file: Optional[str] = None) -> int:
         """
-        从 JSON 文件加载攻击特征规则。
+        从 JSON 文件或目录加载攻击特征规则。
 
         Args:
-            rule_file: JSON 文件路径，None 则使用 SIGNATURE_CONFIG["rules_file"] 默认值。
+            rule_file: JSON 文件路径或目录路径，None 则使用 SIGNATURE_CONFIG["rules_file"] 默认值。
 
         Returns:
             成功加载的规则数量。
@@ -114,8 +121,12 @@ class SignatureEngine(ISignatureEngine):
 
         filepath = Path(str(rule_file))
         if not filepath.exists():
-            logger.warning("规则文件不存在: %s", rule_file)
+            logger.warning("规则路径不存在: %s", rule_file)
             return 0
+
+        # 支持目录：自动加载目录下所有 JSON 文件
+        if filepath.is_dir():
+            return self._load_all_rules_from_dir(str(filepath))
 
         try:
             with open(filepath, "r", encoding="utf-8") as f:
@@ -143,6 +154,157 @@ class SignatureEngine(ISignatureEngine):
         self._matcher.build()
         logger.info("特征库加载完成: %s, 共 %d 条规则", rule_file, loaded)
         return loaded
+
+    # ==================================================================
+    # ★ 规则热加载（监听文件夹，自动加载新增/修改的规则）
+    # ==================================================================
+
+    def start_hot_reload(self, rules_dir: str, interval: int = 3):
+        """
+        启动规则文件夹热加载监听器。
+
+        当 rules_dir 下的 JSON 文件发生修改/新增/删除时，
+        自动重新加载所有规则。
+
+        Args:
+            rules_dir: 规则文件夹路径（如 "data/rules/"）
+            interval: 轮询间隔（秒），默认 3
+        """
+        path = Path(rules_dir)
+        if not path.exists():
+            path.mkdir(parents=True, exist_ok=True)
+            logger.info(f"规则文件夹已创建: {rules_dir}")
+
+        self._rules_dir = str(path)
+        self._hot_reload_running = True
+        self._hot_reload_thread = threading.Thread(
+            target=self._hot_reload_watcher,
+            args=(interval,),
+            daemon=True,
+            name="rule-hot-reload",
+        )
+        self._hot_reload_thread.start()
+        logger.info(f"规则热加载已启动，监听目录: {self._rules_dir}")
+
+    def stop_hot_reload(self):
+        """停止规则热加载监听器"""
+        self._hot_reload_running = False
+        if self._hot_reload_thread and self._hot_reload_thread.is_alive():
+            self._hot_reload_thread.join(timeout=5)
+        logger.info("规则热加载已停止")
+
+    def _load_all_rules_from_dir(self, directory: str) -> int:
+        """加载目录下所有 .json 文件中的规则，合并为一个规则库"""
+        collected = []
+        seen_ids = set()
+        dir_path = Path(directory)
+
+        for filepath in sorted(dir_path.glob("*.json")):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                if isinstance(raw, list):
+                    for item in raw:
+                        rid = item.get("rule_id", "")
+                        if rid and rid not in seen_ids:
+                            collected.append(item)
+                            seen_ids.add(rid)
+                elif isinstance(raw, dict):
+                    rid = raw.get("rule_id", "")
+                    if rid and rid not in seen_ids:
+                        collected.append(raw)
+                        seen_ids.add(rid)
+            except (json.JSONDecodeError, IOError) as e:
+                logger.error(f"解析规则文件失败: {filepath} — {e}")
+
+        # 重建引擎
+        self._rules.clear()
+        self._matcher.clear()
+
+        loaded = 0
+        for item in collected:
+            try:
+                rule = SignatureRule.from_dict(item)
+                if not rule.rule_id or not rule.pattern:
+                    continue
+                self._rules[rule.rule_id] = rule
+                self._matcher.add_pattern(rule.pattern, rule.rule_id)
+                loaded += 1
+            except Exception as e:
+                logger.warning(f"跳过无效规则: {item.get('rule_id', '?')} — {e}")
+
+        self._matcher.build()
+        return loaded
+
+    def _hot_reload_watcher(self, interval: int):
+        """后台线程：轮询检测文件夹文件变化，变化时自动重载"""
+        while self._hot_reload_running:
+            try:
+                changed = False
+                dir_path = Path(self._rules_dir)
+                current_files = {str(f): f.stat().st_mtime for f in dir_path.glob("*.json")}
+
+                # 检测新增/修改
+                for fpath, mtime in current_files.items():
+                    if fpath not in self._rules_file_mtimes or mtime > self._rules_file_mtimes[fpath]:
+                        changed = True
+                        break
+
+                # 检测删除
+                if not changed:
+                    for fpath in self._rules_file_mtimes:
+                        if fpath not in current_files:
+                            changed = True
+                            break
+
+                if changed and current_files:
+                    with self._lock:
+                        loaded = self._load_all_rules_from_dir(self._rules_dir)
+                    self._rules_file_mtimes = current_files
+                    logger.info(f"检测到规则变更，已重新加载 {loaded} 条规则")
+
+            except Exception as e:
+                logger.error(f"热加载监听异常: {e}")
+
+            time.sleep(interval)
+
+    # ==================================================================
+    # 统一加载入口（兼容旧接口 + 热加载）
+    # ==================================================================
+
+    def load_rules_with_hot_reload(self, rules_dir: str = None, rule_file: str = None,
+                                    hot_reload: bool = True) -> int:
+        """
+        一键加载规则并启动热加载监听。
+
+        Args:
+            rules_dir: 规则文件夹路径，默认 "data/rules/"
+            rule_file: 单文件路径（兼容旧版），默认 "data/signatures.json"
+            hot_reload: 是否启用热加载
+
+        Returns:
+            加载的规则总数
+        """
+        d = rules_dir or "data/rules/"
+        f = rule_file or SIGNATURE_CONFIG.get("rules_file", "data/signatures.json")
+
+        # 优先从文件夹加载
+        dir_path = Path(d)
+        if dir_path.exists() and list(dir_path.glob("*.json")):
+            count = self._load_all_rules_from_dir(d)
+            if hot_reload:
+                self.start_hot_reload(d)
+            return count
+        else:
+            # 退化为单文件加载
+            count = self.load_rules(f)
+            # 把原有文件拷贝到 rules 目录以便热加载
+            if hot_reload:
+                dir_path.mkdir(parents=True, exist_ok=True)
+                import shutil
+                shutil.copy2(f, dir_path / "signatures.json")
+                self.start_hot_reload(d)
+            return count
 
     def process_traffic(self, record: TrafficRecord) -> List[Alert]:
         """

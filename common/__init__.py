@@ -39,6 +39,10 @@ from common.engine import (
     ICaptureEngine, ISignatureEngine, IAnomalyEngine,
 )
 
+from common.detector import (
+    IDetector,
+)
+
 from common.utils import (
     setup_logger, ConfigManager,
     ip_to_int, format_timestamp,
@@ -59,6 +63,8 @@ __all__ = [
     "MessageBus", "message_bus",
     # 引擎接口
     "ICaptureEngine", "ISignatureEngine", "IAnomalyEngine",
+    # 检测器插件接口
+    "IDetector",
     # 工具函数
     "setup_logger", "ConfigManager",
     "ip_to_int", "format_timestamp",

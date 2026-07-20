@@ -52,6 +52,7 @@ class NIDSApp:
         self._gui = MainWindow()
         self._gui.set_on_start(lambda: self._start_capture(interface, pcap_file, bpf_filter))
         self._gui.set_on_stop(lambda: self._stop_capture())
+        self._gui.set_on_import_rules(lambda path: self._import_rules(path))
 
         # ---- 模块2: 特征匹配检测（独立于模块3，并行处理） ----
         from module2_signature import SignatureEngine, connect as sig_connect
@@ -123,6 +124,25 @@ class NIDSApp:
         if self._capture:
             self._capture.stop()
         print("[系统] 抓包已停止")
+
+    def _import_rules(self, file_path: str):
+        """导入自定义规则文件到 data/rules/ 并触发重载"""
+        import shutil
+        rules_dir = os.path.join(os.path.dirname(__file__), "data", "rules")
+        os.makedirs(rules_dir, exist_ok=True)
+
+        # 复制到 rules 目录
+        basename = os.path.basename(file_path)
+        dest = os.path.join(rules_dir, basename)
+        shutil.copy2(file_path, dest)
+
+        # 立即重载所有规则
+        if self._signature:
+            count = self._signature._load_all_rules_from_dir(rules_dir)
+            print(f"[系统] 导入规则成功: {basename}，当前共 {count} 条规则")
+            logger.info(f"导入规则 {basename}，当前共 {count} 条规则")
+        else:
+            print(f"[系统] 规则文件已复制到 {dest}（下次启动生效）")
 
     def run(self):
         """启动 GUI 主循环（阻塞）"""

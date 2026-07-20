@@ -74,6 +74,8 @@ class MainWindow:
         self._max_alerts = UI_CONFIG.get("max_alerts_display", 1000)
         self._records: List[TrafficRecord] = []
         self._max_records = 500
+        self._total_traffic_received = 0    # 不受上限限制的总计数
+        self._total_alerts_received = 0     # 不受上限限制的总计数
         self._start_time: Optional[float] = None
         self._stats: dict = {}
 
@@ -95,6 +97,7 @@ class MainWindow:
         # ---- 回调 ----
         self._on_start: Optional[Callable[[], None]] = None
         self._on_stop: Optional[Callable[[], None]] = None
+        self._import_rules_callback: Optional[Callable[[str], None]] = None
 
         # ---- 构建界面 ----
         self._build_menu()
@@ -135,6 +138,8 @@ class MainWindow:
         config_menu = tk.Menu(menubar, tearoff=0)
         config_menu.add_command(label="检测阈值设置...", command=self._open_config_dialog)
         config_menu.add_command(label="白名单管理...", command=self._open_whitelist_dialog)
+        config_menu.add_separator()
+        config_menu.add_command(label="导入自定义规则...", command=self._on_import_rules)
         menubar.add_cascade(label="配置", menu=config_menu)
 
         # 帮助菜单
@@ -157,6 +162,9 @@ class MainWindow:
 
         self._btn_reset = ttk.Button(control_frame, text="↺ 重置统计", command=self._on_btn_reset)
         self._btn_reset.pack(side=tk.LEFT, padx=4)
+
+        self._btn_import_rules = ttk.Button(control_frame, text="📂 导入规则", command=self._on_import_rules)
+        self._btn_import_rules.pack(side=tk.LEFT, padx=4)
 
         self._lbl_status = ttk.Label(control_frame, text="● 已停止", foreground="red")
         self._lbl_status.pack(side=tk.LEFT, padx=16)
@@ -371,10 +379,36 @@ class MainWindow:
     # ==================== 消息总线订阅 ====================
 
     def _subscribe_bus(self):
-        message_bus.subscribe(message_bus.EVENT_SIGNATURE_ALERT, self.add_alert)
-        message_bus.subscribe(message_bus.EVENT_ANOMALY_ALERT, self.add_alert)
-        message_bus.subscribe(message_bus.EVENT_TRAFFIC_RECORD, self.add_traffic_record)
-        message_bus.subscribe(message_bus.EVENT_STATISTICS, self.update_statistics)
+        """订阅 MessageBus 事件，全部通过 root.after(0) 调度到主线程，
+        确保 yview() / insert / delete 等 GUI 操作在正确的线程执行。"""
+        message_bus.subscribe(
+            message_bus.EVENT_SIGNATURE_ALERT,
+            lambda a: self._root.after(0, self.add_alert, a))
+        message_bus.subscribe(
+            message_bus.EVENT_ANOMALY_ALERT,
+            lambda a: self._root.after(0, self.add_alert, a))
+        message_bus.subscribe(
+            message_bus.EVENT_TRAFFIC_RECORD,
+            lambda r: self._root.after(0, self.add_traffic_record, r))
+        message_bus.subscribe(
+            message_bus.EVENT_STATISTICS,
+            lambda s: self._root.after(0, self.update_statistics, s))
+
+    def _is_tree_at_bottom(self, tree) -> bool:
+        """检查 treeview 是否滚动到最底部（最后一个 item 完全可见）。
+        
+        用 bbox 检查比 yview()[1] >= 0.99 更可靠：
+        - 少量数据时 yview()[1] 始终为 1.0 导致误判
+        - bbox 直接检查最后一个 item 的像素位置
+        """
+        children = tree.get_children()
+        if not children:
+            return True
+        bbox = tree.bbox(children[-1])
+        if bbox is None:
+            return False  # 最后一个 item 不可见 → 不在底部
+        tree_height = tree.winfo_height()
+        return bbox[1] + bbox[3] <= tree_height + 2  # 2px 容差
 
     # ==================== 数据输入 ====================
 
@@ -406,6 +440,7 @@ class MainWindow:
     def add_alert(self, alert: Alert):
         """接收 Alert 对象并添加到列表"""
         self._alerts.append(alert)
+        self._total_alerts_received += 1
 
         # 追踪 IP
         self._track_ip(alert.src_ip, alert.dst_ip or "")
@@ -449,8 +484,8 @@ class MainWindow:
 
     def _insert_alert_row(self, alert: Alert):
         """将一条告警插入树表格（仅底部时跟随滚动）"""
-        # 插入前：用户是否在看最新（底部）
-        at_bottom = self._tree.yview()[1] >= 0.99
+        # 插入前：检查用户是否在底部（通过 bbox 精确判断）
+        at_bottom = self._is_tree_at_bottom(self._tree)
 
         # 初始状态
         state = self._alert_states.setdefault(alert.alert_id, {"status": "待处理", "note": ""})
@@ -488,6 +523,7 @@ class MainWindow:
     def add_traffic_record(self, record: TrafficRecord):
         """接收 TrafficRecord 并添加到流量列表"""
         self._records.append(record)
+        self._total_traffic_received += 1
 
         # 追踪 IP
         src_ip = record.src.ip if hasattr(record.src, 'ip') else ""
@@ -534,8 +570,8 @@ class MainWindow:
 
     def _insert_traffic_row(self, record: TrafficRecord):
         """将一条流量记录插入树表格（仅底部时跟随滚动）"""
-        # 插入前：用户是否在看最新（底部）
-        at_bottom = self._traffic_tree.yview()[1] >= 0.99
+        # 插入前：检查用户是否在底部（通过 bbox 精确判断）
+        at_bottom = self._is_tree_at_bottom(self._traffic_tree)
 
         ts = time.strftime("%H:%M:%S", time.localtime(record.timestamp)) if record.timestamp else "--:--:--"
         proto = (record.protocol or {}).value if hasattr(record.protocol, 'value') else str(record.protocol or "?")
@@ -593,6 +629,10 @@ class MainWindow:
         """注册停止回调"""
         self._on_stop = callback
 
+    def set_on_import_rules(self, callback: Callable[[str], None]):
+        """注册导入规则回调（参数为所选 JSON 文件路径）"""
+        self._import_rules_callback = callback
+
     def run(self):
         """启动 GUI 主循环（阻塞）"""
         self._root.mainloop()
@@ -624,6 +664,24 @@ class MainWindow:
 
         logger.info("检测已停止")
 
+    def _on_import_rules(self):
+        """打开文件对话框导入自定义规则"""
+        file_path = filedialog.askopenfilename(
+            title="导入自定义规则文件",
+            filetypes=[("JSON 规则文件", "*.json"), ("所有文件", "*.*")],
+        )
+        if not file_path:
+            return  # 用户取消
+
+        if self._import_rules_callback:
+            try:
+                self._import_rules_callback(file_path)
+                messagebox.showinfo("导入成功", f"规则文件已导入:\n{file_path}")
+            except Exception as e:
+                messagebox.showerror("导入失败", f"导入规则时出错:\n{e}")
+        else:
+            messagebox.showwarning("未就绪", "检测引擎未初始化，请先启动系统。")
+
     def _on_btn_reset(self):
         """重置统计"""
         if messagebox.askyesno("确认", "确定要清空所有告警、流量并重置统计吗？"):
@@ -631,6 +689,8 @@ class MainWindow:
             self._clear_traffic()
             self._alerts.clear()
             self._records.clear()
+            self._total_alerts_received = 0
+            self._total_traffic_received = 0
             self._alert_states.clear()
             self._stats = {}
             # 通知后台引擎一起重置
@@ -1674,7 +1734,8 @@ class MainWindow:
 
     def _refresh_status(self):
         """刷新状态栏"""
-        self._lbl_total.config(text=f"告警: {len(self._alerts)} | 流量: {len(self._records)}")
+        self._lbl_total.config(
+            text=f"告警: {self._total_alerts_received} | 流量: {self._total_traffic_received}")
 
         if self._running and self._start_time:
             elapsed = int(time.time() - self._start_time)
