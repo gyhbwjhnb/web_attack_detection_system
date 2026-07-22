@@ -38,3 +38,9 @@ Thumbs.db
 # 测试产物
 tests/__pycache__/
 .pytest_cache/
+
+# 文档（本地保留，不提交）
+docs/
+generate_ppt.py
+generate_report.py
+project.zip

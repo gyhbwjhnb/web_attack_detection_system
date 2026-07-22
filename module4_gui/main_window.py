@@ -233,13 +233,14 @@ class MainWindow:
         table_frame = ttk.Frame(parent)
         table_frame.pack(fill=tk.BOTH, expand=True)
 
-        columns = ("id", "time", "type", "severity", "src", "dst", "description", "status", "note")
+        columns = ("id", "time", "type", "severity", "confidence", "src", "dst", "description", "status", "note")
         self._tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse")
 
         self._tree.heading("id", text="ID")
         self._tree.heading("time", text="时间")
         self._tree.heading("type", text="攻击类型")
         self._tree.heading("severity", text="等级")
+        self._tree.heading("confidence", text="置信度")
         self._tree.heading("src", text="来源")
         self._tree.heading("dst", text="目标")
         self._tree.heading("description", text="描述")
@@ -250,6 +251,7 @@ class MainWindow:
         self._tree.column("time", width=120, minwidth=90)
         self._tree.column("type", width=90, minwidth=70)
         self._tree.column("severity", width=45, minwidth=40)
+        self._tree.column("confidence", width=55, minwidth=50)
         self._tree.column("src", width=140, minwidth=100)
         self._tree.column("dst", width=140, minwidth=100)
         self._tree.column("description", width=220, minwidth=120)
@@ -512,6 +514,7 @@ class MainWindow:
             ts,
             alert.attack_name or alert.attack_type,
             severity_name,
+            f"{alert.confidence:.2f}" if alert.confidence > 0 else "-",
             src,
             dst,
             alert.title or alert.description[:60],
@@ -851,13 +854,14 @@ class MainWindow:
         try:
             with open(path, "w", newline="", encoding="utf-8-sig") as f:
                 writer = csv.writer(f)
-                writer.writerow(["告警ID", "时间", "攻击类型", "等级", "来源IP", "来源端口",
+                writer.writerow(["告警ID", "时间", "攻击类型", "等级", "置信度", "来源IP", "来源端口",
                                  "目标IP", "目标端口", "描述", "建议"])
                 for a in self._alerts:
                     ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(a.timestamp))
                     writer.writerow([
                         a.alert_id, ts, a.attack_name or a.attack_type,
-                        a.severity.value, a.src_ip, a.src_port,
+                        a.severity.value, f"{a.confidence:.2f}",
+                        a.src_ip, a.src_port,
                         a.dst_ip, a.dst_port, a.title, a.suggestion,
                     ])
             self._status_text.set(f"已导出 {len(self._alerts)} 条告警到 {os.path.basename(path)}")
@@ -1967,7 +1971,7 @@ class AlertDetailDialog(tk.Toplevel):
         frame = ttk.Frame(self, padding=16)
         frame.pack(fill=tk.BOTH, expand=True)
 
-        labels = ["告警ID", "时间", "攻击类型", "等级", "来源", "目标", "描述"]
+        labels = ["告警ID", "时间", "攻击类型", "等级", "置信度", "来源", "目标", "描述"]
         for i, (label, value) in enumerate(zip(labels, values)):
             ttk.Label(frame, text=f"{label}:", font=("", 9, "bold")).grid(
                 row=i, column=0, sticky=tk.W, pady=2, padx=(0, 8))
