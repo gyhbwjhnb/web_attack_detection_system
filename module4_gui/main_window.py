@@ -79,6 +79,12 @@ class MainWindow:
         self._start_time: Optional[float] = None
         self._stats: dict = {}
 
+        # flow_id → TrafficRecord 映射（供告警关联下载）
+        self._flow_id_to_record: Dict[str, TrafficRecord] = {}
+
+        # 告警对象字典（供详情对话框下载）
+        self._alert_by_id: Dict[str, Alert] = {}
+
         # ---- 筛选状态 ----
         self._alert_filter_ip = ""
         self._alert_filter_type = ""
@@ -443,6 +449,7 @@ class MainWindow:
         """接收 Alert 对象并添加到列表"""
         self._alerts.append(alert)
         self._total_alerts_received += 1
+        self._alert_by_id[alert.alert_id] = alert
 
         # 追踪 IP
         self._track_ip(alert.src_ip, alert.dst_ip or "")
@@ -450,7 +457,8 @@ class MainWindow:
 
         # 限制最大条数
         while len(self._alerts) > self._max_alerts:
-            self._alerts.pop(0)
+            old = self._alerts.pop(0)
+            self._alert_by_id.pop(old.alert_id, None)
 
         # 检查筛选条件
         if not self._alert_matches_filter(alert):
@@ -526,6 +534,10 @@ class MainWindow:
         """接收 TrafficRecord 并添加到流量列表"""
         self._records.append(record)
         self._total_traffic_received += 1
+
+        # 维护 flow_id → record 映射
+        if record.flow_id:
+            self._flow_id_to_record[record.flow_id] = record
 
         # 追踪 IP
         src_ip = record.src.ip if hasattr(record.src, 'ip') else ""
@@ -698,6 +710,7 @@ class MainWindow:
             self._total_alerts_received = 0
             self._total_traffic_received = 0
             self._alert_states.clear()
+            self._alert_by_id.clear()
             self._stats = {}
             # 通知后台引擎一起重置
             message_bus.publish(message_bus.EVENT_CONFIG_CHANGE, {"action": "reset"})
@@ -1272,6 +1285,7 @@ class MainWindow:
             self._tree.delete(item)
         self._alerts.clear()
         self._alert_states.clear()
+        self._alert_by_id.clear()
         self._alert_filter_ip = ""
         self._alert_filter_type = ""
         self._alert_filter_port = ""
@@ -1284,6 +1298,7 @@ class MainWindow:
         for item in self._traffic_tree.get_children():
             self._traffic_tree.delete(item)
         self._records.clear()
+        self._flow_id_to_record.clear()
         self._traffic_filter_ip = ""
         self._traffic_filter_proto = ""
         self._traffic_filter_port = ""
@@ -1735,8 +1750,16 @@ class MainWindow:
             return
         item = self._tree.item(selection[0])
         values = item["values"]
-        if values:
-            AlertDetailDialog(self._root, values)
+        if not values:
+            return
+        # 通过 alert_id 前缀查找完整 Alert 对象
+        alert_id_prefix = values[0]
+        alert = None
+        for aid, a in self._alert_by_id.items():
+            if aid.startswith(alert_id_prefix):
+                alert = a
+                break
+        AlertDetailDialog(self._root, values, alert, self._flow_id_to_record)
 
     def _on_traffic_double_click(self, event):
         """双击流量行查看详情"""
@@ -1932,12 +1955,14 @@ class ConfigDialog(tk.Toplevel):
 class AlertDetailDialog(tk.Toplevel):
     """告警详情对话框"""
 
-    def __init__(self, parent, values: tuple):
+    def __init__(self, parent, values: tuple, alert=None, flow_id_map: dict = None):
         super().__init__(parent)
         self.title("告警详情")
-        self.geometry("500x320")
+        self.geometry("520x360")
         self.resizable(False, False)
         self.transient(parent)
+        self._alert = alert
+        self._flow_id_map = flow_id_map or {}
 
         frame = ttk.Frame(self, padding=16)
         frame.pack(fill=tk.BOTH, expand=True)
@@ -1949,8 +1974,98 @@ class AlertDetailDialog(tk.Toplevel):
             ttk.Label(frame, text=str(value), wraplength=380).grid(
                 row=i, column=1, sticky=tk.W, pady=2)
 
-        ttk.Button(frame, text="关闭", command=self.destroy).grid(
-            row=len(labels), columnspan=2, pady=16)
+        # 附加信息
+        row_offset = len(labels)
+        has_record = False
+        if alert and alert.flow_id:
+            record = self._flow_id_map.get(alert.flow_id)
+            if record:
+                has_record = True
+                payload = record.payload_raw
+                if payload and isinstance(payload, bytes) and len(payload) > 0:
+                    ttk.Label(frame, text="载荷大小:", font=("", 9, "bold")).grid(
+                        row=row_offset, column=0, sticky=tk.W, pady=2, padx=(0, 8))
+                    ttk.Label(frame, text=f"{len(payload)} 字节", foreground="#333").grid(
+                        row=row_offset, column=1, sticky=tk.W, pady=2)
+                    row_offset += 1
+                elif hasattr(record, 'payload_size') and record.payload_size:
+                    ttk.Label(frame, text="载荷大小:", font=("", 9, "bold")).grid(
+                        row=row_offset, column=0, sticky=tk.W, pady=2, padx=(0, 8))
+                    ttk.Label(frame, text=f"{record.payload_size} 字节（无原始载荷）", foreground="#999").grid(
+                        row=row_offset, column=1, sticky=tk.W, pady=2)
+                    row_offset += 1
+
+        btn_frame = ttk.Frame(frame)
+        btn_frame.grid(row=row_offset, columnspan=2, pady=16)
+
+        if has_record:
+            ttk.Button(btn_frame, text="下载流量包", command=self._download).pack(side=tk.LEFT, padx=(0, 8))
+        elif alert:
+            ttk.Label(btn_frame, text="（无法关联原始流量包）", foreground="#999").pack(side=tk.LEFT, padx=(0, 8))
+
+        ttk.Button(btn_frame, text="关闭", command=self.destroy).pack(side=tk.LEFT)
+
+    def _download(self):
+        """导出告警关联的流量包数据"""
+        from tkinter import filedialog
+
+        if not self._alert or not self._alert.flow_id:
+            self._show_toast("未关联流量记录")
+            return
+
+        record = self._flow_id_map.get(self._alert.flow_id)
+        if not record:
+            self._show_toast("未找到对应的原始流量包")
+            return
+
+        ts_tag = time.strftime("%Y%m%d_%H%M%S", time.localtime(self._alert.timestamp)) if self._alert.timestamp else "unknown"
+        attack_type = self._alert.attack_type or "unknown"
+        default_name = f"alert_{attack_type}_{self._alert.src_ip}_{ts_tag}"
+
+        payload = record.payload_raw
+        if payload and isinstance(payload, bytes) and len(payload) > 0:
+            filepath = filedialog.asksaveasfilename(
+                parent=self,
+                title="保存流量包",
+                initialfile=f"{default_name}.bin",
+                defaultextension=".bin",
+                filetypes=[("原始二进制", "*.bin"), ("所有文件", "*.*")],
+            )
+            if filepath:
+                with open(filepath, "wb") as f:
+                    f.write(payload)
+                self._show_toast(f"已保存 {len(payload)} 字节到 {filepath}")
+        else:
+            filepath = filedialog.asksaveasfilename(
+                parent=self,
+                title="保存流量信息",
+                initialfile=f"{default_name}.json",
+                defaultextension=".json",
+                filetypes=[("JSON", "*.json"), ("所有文件", "*.*")],
+            )
+            if filepath:
+                meta = {
+                    "alert_id": self._alert.alert_id,
+                    "timestamp": ts_tag,
+                    "attack_type": self._alert.attack_type,
+                    "src_ip": self._alert.src_ip,
+                    "dst_ip": self._alert.dst_ip,
+                    "protocol": record.protocol.value if hasattr(record.protocol, 'value') else str(record.protocol),
+                    "title": self._alert.title,
+                    "description": self._alert.description,
+                }
+                import json
+                with open(filepath, "w", encoding="utf-8") as f:
+                    json.dump(meta, f, ensure_ascii=False, indent=2)
+                self._show_toast(f"已保存元数据到 {filepath}")
+
+    def _show_toast(self, msg):
+        toast = tk.Toplevel(self)
+        toast.wm_overrideredirect(True)
+        toast.geometry(f"+{self.winfo_rootx() + 40}+{self.winfo_rooty() + 40}")
+        lbl = ttk.Label(toast, text=msg, padding=10, background="#333", foreground="#fff")
+        lbl.pack()
+        toast.after(2500, toast.destroy)
 
 
 class TrafficDetailDialog(tk.Toplevel):
