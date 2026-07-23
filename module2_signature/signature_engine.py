@@ -82,8 +82,8 @@ class SignatureEngine(ISignatureEngine):
         self._brute_force_alerted: Dict[Tuple[str, str, int], float] = {}
 
         # --- 告警去重 ---
-        # key: (src_ip, dst_ip, attack_type) -> last_alert_timestamp
-        self._dedup_cache: Dict[Tuple[str, str, str], float] = {}
+        # key: (src_ip, dst_ip, dst_port, attack_type) -> last_alert_timestamp
+        self._dedup_cache: Dict[Tuple[str, str, int, str], float] = {}
         self._dedup_window: int = SIGNATURE_CONFIG.get("alert_dedup_window", 300)
 
         # --- 回调 ---
@@ -169,6 +169,11 @@ class SignatureEngine(ISignatureEngine):
 
             self._traffic_processed += 1
 
+        # TLS 加密流量跳过特征匹配（加密载荷的随机字节会频繁命中特征模式，造成大量误报）
+        # 注意：异常行为检测（模块三）独立于此处继续运行，不受影响
+        if self._is_encrypted_traffic(record):
+            return []
+
         alerts: List[Alert] = []
 
         try:
@@ -177,6 +182,10 @@ class SignatureEngine(ISignatureEngine):
             if not text_to_scan:
                 # 载荷为空，无法匹配
                 return alerts
+
+            # 判定检测上下文：是否来自 HTTP 字段（URI/body/headers）
+            # 纯 payload 检测时，短模式特征极易在二进制数据中误报
+            is_http_context = bool(record.http_uri or record.http_body)
 
             # --- 2. Aho-Corasick 多模式匹配 ---
             matches = self._matcher.search(text_to_scan)
@@ -190,6 +199,11 @@ class SignatureEngine(ISignatureEngine):
 
                 rule = self._rules.get(rule_id)
                 if rule is None:
+                    continue
+
+                # 短模式特征防护：长度 < 4 的特征模式（如 |、--、1=1、../）
+                # 在非 HTTP 载荷中对二进制随机数据极易误报，只允许在 HTTP 上下文匹配
+                if not is_http_context and rule and len(rule.pattern) < 4:
                     continue
 
                 # 分类开关检查
@@ -211,7 +225,8 @@ class SignatureEngine(ISignatureEngine):
                     continue
 
                 # --- 5. 告警去重 ---
-                dedup_key = (record.src.ip, record.dst.ip, rule.attack_type)
+                # 包含 dst_port：同主机不同端口的同类攻击不应被去重
+                dedup_key = (record.src.ip, record.dst.ip, record.dst.port, rule.attack_type)
                 if self._is_dedup(dedup_key):
                     continue
 
@@ -304,11 +319,15 @@ class SignatureEngine(ISignatureEngine):
         从 TrafficRecord 中提取待扫描文本。
 
         优先使用 HTTP 全字段（URI + body + headers 等），
-        否则使用 payload 文本。
+        其次 DNS 查询域名，否则使用 payload 文本。
         """
         # HTTP 流量：拼接所有 HTTP 相关字段
         if record.http_uri or record.http_body:
             return record.all_http_text
+
+        # DNS 流量：扫描解析后的域名（用于 DNS 隧道检测）
+        if record.dns_query:
+            return record.dns_query
 
         # 普通流量：使用 payload
         if record.payload:
@@ -335,13 +354,14 @@ class SignatureEngine(ISignatureEngine):
         category = category_map.get(attack_type, attack_type)
         return self._category_enabled.get(category, True)
 
-    def _is_dedup(self, key: Tuple[str, str, str]) -> bool:
-        """告警去重检查：同源同目的同类型在窗口期内是否已告警。"""
+    def _is_dedup(self, key: Tuple[str, str, int, str]) -> bool:
+        """告警去重检查：同源同目的同端口同类型在窗口期内是否已告警。"""
         now = time.time()
-        last_time = self._dedup_cache.get(key, 0)
-        if now - last_time < self._dedup_window:
-            return True
-        self._dedup_cache[key] = now
+        with self._lock:
+            last_time = self._dedup_cache.get(key, 0)
+            if now - last_time < self._dedup_window:
+                return True
+            self._dedup_cache[key] = now
         return False
 
     def _create_alert(self, record: TrafficRecord,
@@ -395,6 +415,70 @@ class SignatureEngine(ISignatureEngine):
         )
         return alert
 
+    def _is_encrypted_traffic(self, record: TrafficRecord) -> bool:
+        """
+        综合判断流量是否为加密流量，跳过特征匹配。
+
+        四种检测手段（任一命中即为加密）:
+          1. packet_parser 已标记 tls_version（如 TLS 1.3、TLS (encrypted)）
+          2. 443/8443 端口 + 无 HTTP 内容（双向检查，TCP 分段导致 TLS 记录头错位时的兜底）
+          3. 载荷首字节为 TLS 记录类型（0x14~0x17）
+          4. 高熵载荷检测（非标准端口加密流量/自定义协议加密数据兜底）
+        """
+        # HTTP 内容存在时不做加密判定（明文 HTTP 不应被跳过）
+        has_http_content = bool(record.http_uri or record.http_body)
+
+        # 1. 已有 TLS 检测标记
+        if record.tls_version and not has_http_content:
+            return True
+
+        # 2. 加密端口 + 无 HTTP 内容（双向检查：服务器响应 src.port=443）
+        ENCRYPTED_PORTS = {443, 8443,      # HTTPS / HTTPS-alt
+                          465, 587,         # SMTPS
+                          993,              # IMAPS
+                          995,              # POP3S
+                          853,              # DNS-over-TLS
+                          636,              # LDAPS
+                          989, 990,         # FTPS
+                          5222, 5223,       # XMPP-over-TLS
+                          5061}             # SIPS
+        if (record.dst.port in ENCRYPTED_PORTS or record.src.port in ENCRYPTED_PORTS):
+            if not has_http_content:
+                return True
+
+        # 3. 载荷首字节为 TLS 记录类型（TCP 分段或版本不标准时的补充检测）
+        #    需要 !has_http_content 守卫，防止攻击者用 0x14-0x17 开头字节绕过检测
+        if record.payload_raw and len(record.payload_raw) > 0:
+            first = record.payload_raw[0]
+            if first in (0x14, 0x15, 0x16, 0x17) and not has_http_content:
+                return True
+
+        # 4. 高熵载荷检测：加密/压缩数据的字节分布接近均匀，熵值高（通常 > 7.0），
+        #    而明文文本/协议有偏分布，熵值较低。用于识别非标准端口的加密流量。
+        if record.payload_raw and len(record.payload_raw) >= 8:
+            entropy = self._calc_entropy(record.payload_raw)
+            if entropy > 7.0:
+                return True
+
+        return False
+
+    @staticmethod
+    def _calc_entropy(data: bytes) -> float:
+        """计算字节序列的香农熵（0.0 ~ 8.0），用于区分加密数据与明文。"""
+        if not data:
+            return 0.0
+        import math
+        freq = [0] * 256
+        for b in data:
+            freq[b] += 1
+        length = len(data)
+        entropy = 0.0
+        for count in freq:
+            if count:
+                p = count / length
+                entropy -= p * math.log2(p)
+        return entropy
+
     def _fire_alert(self, alert: Alert):
         """触发告警回调。"""
         if self._on_alert_callback:
@@ -445,14 +529,14 @@ class SignatureEngine(ISignatureEngine):
 
             fail_count = len(self._login_failures[bf_key])
 
-        if fail_count < self._brute_force_threshold:
-            return alerts
+            if fail_count < self._brute_force_threshold:
+                return alerts
 
-        # 去重：同一组 (src, dst, port) 60 秒内只告警一次
-        last_alert_time = self._brute_force_alerted.get(bf_key, 0)
-        if now - last_alert_time < self._brute_force_window:
-            return alerts
-        self._brute_force_alerted[bf_key] = now
+            # 去重：同一组 (src, dst, port) 60 秒内只告警一次
+            last_alert_time = self._brute_force_alerted.get(bf_key, 0)
+            if now - last_alert_time < self._brute_force_window:
+                return alerts
+            self._brute_force_alerted[bf_key] = now
 
         # 生成暴力破解告警
         attack_info = ATTACK_TYPES.get("brute_force", {})

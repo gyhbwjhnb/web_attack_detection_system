@@ -50,6 +50,7 @@ class HostStats:
 
         # ---- 时间戳记录（用于滑动窗口统计） ----
         self.conn_timestamps: List[float] = []          # 每条连接的时间戳
+        self.syn_timestamps: List[float] = []            # SYN 包时间戳（per-host）
         self.port_timestamps: Dict[int, List[float]] = defaultdict(list)
         self.peer_timestamps: Dict[str, List[float]] = defaultdict(list)
         self.service_attempts: Dict[Tuple[str, int], List[float]] = defaultdict(list)
@@ -80,7 +81,14 @@ class AnomalyEngine(IAnomalyEngine):
         alerts = engine.process_traffic(record)
     """
 
-    SENSITIVE_PORTS = {21, 22, 23, 3389, 3306, 5432, 6379, 27017, 1433, 8080, 8443}
+    SENSITIVE_PORTS = {21, 22, 23, 80, 443, 3389, 3306, 5432, 6379, 27017, 1433, 8080, 8443}
+
+    # 登录失败特征模式（与模块二 BRUTE-001/002/003 保持一致）
+    _LOGIN_FAIL_PATTERNS = [
+        "login failed", "password incorrect", "invalid username",
+        "authentication failed", "access denied", "bad password",
+        "wrong password", "login incorrect", "incorrect password",
+    ]
 
     def __init__(self, config: dict = None):
         self._config = config or ANOMALY_CONFIG
@@ -124,7 +132,7 @@ class AnomalyEngine(IAnomalyEngine):
         self._last_cleanup = time.time()
 
         # ---- 外联白名单 ----
-        self._known_external: Set[str] = set()
+        self._known_external: Set[Tuple[str, int]] = set()  # (dst_ip, dst_port) tuples
 
         # ---- 订阅 GUI 重置事件 ----
         from common.message_bus import message_bus
@@ -272,6 +280,7 @@ class AnomalyEngine(IAnomalyEngine):
 
             if record.is_syn():
                 host.total_syn += 1
+                host.syn_timestamps.append(now)  # per-host SYN tracking
                 self._syn_timestamps.append(now)
 
         # ---- 学习模式 ----
@@ -286,7 +295,7 @@ class AnomalyEngine(IAnomalyEngine):
         alerts.extend(self._detect_abnormal_outbound(record))
         alerts.extend(self._detect_lateral_movement(record, now))
 
-        syn_alerts = self._detect_syn_flood(now)
+        syn_alerts = self._detect_syn_flood(record, now)
         if syn_alerts:
             alerts.extend(syn_alerts)
 
@@ -342,12 +351,24 @@ class AnomalyEngine(IAnomalyEngine):
     # ==================== 暴力破解 ====================
 
     def _detect_brute_force(self, record: TrafficRecord, now: float) -> List[Alert]:
+        """检测暴力破解行为。
+
+        改进策略（修复纯连接计数导致的误报）:
+          1. 检查载荷中是否包含登录失败特征（与模块二保持一致）
+          2. 有登录失败内容 → 低阈值（10次/5秒），确认暴力破解
+          3. 无登录失败内容 → 高阈值（50次/5秒），防止正常高并发误报
+          4. 新增 80/443 端口覆盖（HTTP 表单暴力破解）
+        """
         dst_port = record.dst.port
         if dst_port not in self.SENSITIVE_PORTS:
             return []
 
-        threshold = self._config.get("brute_force_threshold", 10)
+        base_threshold = self._config.get("brute_force_threshold", 10)
         window = self._config.get("brute_force_window_sec", 5)
+
+        # 检查登录失败特征（与模块二 BRUTE-001/002/003 一致）
+        payload_lower = (record.payload or "").lower()
+        has_login_failure = any(p in payload_lower for p in self._LOGIN_FAIL_PATTERNS)
 
         with self._lock:
             host = self._hosts.get(record.src.ip)
@@ -357,15 +378,23 @@ class AnomalyEngine(IAnomalyEngine):
             key = (record.dst.ip, dst_port)
             count = self._count_recent(host.service_attempts.get(key, []), now, window)
 
+            # 自适应阈值：有登录失败内容时用低阈值，否则需要极高的连接数
+            if has_login_failure:
+                threshold = base_threshold  # 默认 10 次
+            else:
+                threshold = base_threshold * 5  # 默认 50 次（纯连接计数需要更高证据）
+
             if count >= threshold:
                 svc_map = {22: "SSH", 21: "FTP", 3389: "RDP", 3306: "MySQL",
                            5432: "PostgreSQL", 1433: "MSSQL", 6379: "Redis",
-                           27017: "MongoDB", 23: "Telnet", 8080: "HTTP-Proxy", 8443: "HTTPS-Alt"}
+                           27017: "MongoDB", 23: "Telnet", 80: "HTTP", 443: "HTTPS",
+                           8080: "HTTP-Proxy", 8443: "HTTPS-Alt"}
                 svc = svc_map.get(dst_port, str(dst_port))
+                evidence = "含登录失败" if has_login_failure else "高频连接"
 
                 return [self._make_alert(
                     record, "brute_force", AlertSeverity.HIGH,
-                    f"{svc} 暴力破解: {record.src.ip} → {record.dst.ip}:{dst_port} ({count}次/{window}s)",
+                    f"{svc} 暴力破解: {record.src.ip} → {record.dst.ip}:{dst_port} ({count}次/{window}s, {evidence})",
                     f"{svc}爆破{count}次/{window}s",
                     f"检查 {svc} 服务日志，建议启用 fail2ban 或限制登录频率"
                 )]
@@ -374,27 +403,48 @@ class AnomalyEngine(IAnomalyEngine):
 
     # ==================== 异常外联 ====================
 
+    # 标准出站端口：正常的 Web 浏览/DNS/NTP，首次连接不告警
+    STANDARD_OUTBOUND_PORTS = {80, 443, 53, 8080, 8443, 123}
+
     def _detect_abnormal_outbound(self, record: TrafficRecord) -> List[Alert]:
+        """检测异常外联行为。
+
+        改进策略（修复每新IP都告警的问题）:
+          1. 按 (dst_ip, dst_port) 追踪，而非仅按 IP
+          2. 首次连接标准端口 → 静默记录，永不告警
+          3. 首次连接非标准端口 → 静默记录，短时间内再次连接才告警
+          4. 标准端口的新连接不产生告警
+        """
         from common.data_structures import is_private_ip
         src_ip, dst_ip = record.src.ip, record.dst.ip
+        dst_port = record.dst.port
+        now = time.time()
 
+        # 只关注内网 → 外网的连接
         if not is_private_ip(src_ip) or is_private_ip(dst_ip):
             return []
-        if dst_ip in self._known_external:
+
+        key = (dst_ip, dst_port)
+
+        # 标准端口：静默记录，永不告警（正常上网行为）
+        if dst_port in self.STANDARD_OUTBOUND_PORTS:
+            self._known_external.add(key)
             return []
 
-        self._known_external.add(dst_ip)
+        # 非标准端口：首次连接记录，多次连接才告警
+        if key in self._known_external:
+            # 已见过的 (IP, port) 组合再次连接 → 告警
+            severity = AlertSeverity.HIGH if dst_port not in {80, 443} else AlertSeverity.MEDIUM
+            return [self._make_alert(
+                record, "abnormal_outbound", severity,
+                f"异常外联: 内网 {src_ip} → 外部 {dst_ip}:{dst_port}（非标准端口重复连接）",
+                f"重复外联 {dst_ip}:{dst_port}",
+                "检查该主机是否感染恶意软件或存在 C2 通信，建议临时隔离"
+            )]
 
-        # 非标准出站端口升高可疑度
-        standard = {80, 443, 53, 8080, 8443, 123}
-        severity = AlertSeverity.HIGH if record.dst.port not in standard else AlertSeverity.MEDIUM
-
-        return [self._make_alert(
-            record, "abnormal_outbound", severity,
-            f"异常外联: 内网 {src_ip} → 外部 {dst_ip}:{record.dst.port}",
-            f"未知外部IP {dst_ip}:{record.dst.port}",
-            "检查该主机是否感染恶意软件或存在 C2 通信，建议临时隔离"
-        )]
+        # 首次连接非标准端口：记录但暂不告警
+        self._known_external.add(key)
+        return []
 
     # ==================== 横向扩散 ====================
 
@@ -429,29 +479,43 @@ class AnomalyEngine(IAnomalyEngine):
 
     # ==================== SYN Flood ====================
 
-    def _detect_syn_flood(self, now: float) -> List[Alert]:
+    def _detect_syn_flood(self, record: TrafficRecord, now: float) -> List[Alert]:
+        """检测 SYN Flood 攻击。
+
+        改进策略（修复全局计数器误报+数据丢失）:
+          1. 按来源 IP 检测，而非全局 SYN 总数
+          2. 告警后不 clear() 全部数据，仅移除该主机的过期时间戳
+          3. 全局 _syn_timestamps 保留用于降级检测
+        """
+        if not record.is_syn():
+            return []
+
         threshold = self._config.get("syn_flood_threshold", 100)
         window = self._config.get("syn_flood_window_sec", 1)
 
-        self._syn_timestamps = [t for t in self._syn_timestamps if now - t <= window]
-        count = len(self._syn_timestamps)
+        with self._lock:
+            host = self._hosts.get(record.src.ip)
+            if not host:
+                return []
 
-        if count >= threshold:
-            self._syn_timestamps.clear()
-            return [Alert(
-                timestamp=now,
-                attack_type="ddos",
-                attack_name="SYN Flood 攻击",
-                severity=AlertSeverity.CRITICAL,
-                confidence=min(count / threshold / 2, 1.0),
-                alert_source=AlertType.ANOMALY,
-                title="SYN Flood 攻击",
-                description=f"SYN Flood: {count}包/{window}s (阈值={threshold})",
-                matched_pattern=f"SYN速率{count}/s",
-                suggestion="启用 SYN Cookie、限流或联系上游 ISP 清洗",
+            syn_count = self._count_recent(host.syn_timestamps, now, window)
+
+            if syn_count < threshold:
+                return []
+
+            # 修剪过期的 SYN 时间戳（不再 clear() 全部）
+            cutoff = now - window
+            host.syn_timestamps = [t for t in host.syn_timestamps if t > cutoff]
+
+            # 同时修剪全局 SYN 队列
+            self._syn_timestamps = [t for t in self._syn_timestamps if now - t <= self._recent_window]
+
+            return [self._make_alert(
+                record, "ddos", AlertSeverity.CRITICAL,
+                f"SYN Flood: {record.src.ip} {syn_count}包/{window}s (阈值={threshold})",
+                f"SYN速率{syn_count}/s",
+                "启用 SYN Cookie、限流或联系上游 ISP 清洗"
             )]
-
-        return []
 
     # ==================== 带宽异常（改进：近期 vs 基线） ====================
 
@@ -535,9 +599,9 @@ class AnomalyEngine(IAnomalyEngine):
                 ))
 
             # --- SYN 比例突变 ---
-            # 简化：用全局 SYN 队列近期的速率 / 检测窗口
-            syn_in_window = self._count_recent(self._syn_timestamps, now, self._recent_window)
-            syn_rate = syn_in_window / max(self._recent_window / 60.0, 1)  # SYN/分钟
+            # 使用主机级 SYN 计数（修复：之前错误地使用全局 self._syn_timestamps）
+            syn_in_window = self._count_recent(host.syn_timestamps, now, self._recent_window)
+            syn_rate = syn_in_window / max(self._recent_window / 60.0, 1)  # 本主机 SYN/分钟
             normal_syn_rate = baseline_conn_rate * 0.3  # 经验值：正常 SYN 约占 30%
             if syn_rate > normal_syn_rate * self._config.get("mutation_syn_ratio", 3.0) and syn_in_window > self._config.get("mutation_syn_min", 30):
                 alerts.append(self._make_alert(

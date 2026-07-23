@@ -338,15 +338,49 @@ HTTP_METHODS = {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD",
 
 
 def _is_http(payload: str, payload_upper: str) -> bool:
-    """判断是否为 HTTP 协议"""
-    # 请求: 以 HTTP 方法开头
+    """
+    判断是否为 HTTP 协议。
+
+    增强校验防止二进制载荷误判为 HTTP（TLS 加密数据解码为 latin-1
+    后可能随机包含 "GET"、"POST" 等字节序列）。
+
+    校验规则:
+      请求: "METHOD /uri HTTP/1.x" 格式
+      响应: "HTTP/1.x 200 OK" 格式
+    """
     first_line = payload_upper.split("\r\n")[0].split("\n")[0].strip()
+    if not first_line:
+        return False
+
+    # ---- 响应检测: "HTTP/" 开头 ----
+    if first_line.startswith("HTTP/"):
+        # 必须包含协议版本和状态码，如 "HTTP/1.1 200"
+        parts = first_line.split()
+        return len(parts) >= 2 and ("/1." in parts[0] or "/2" in parts[0])
+
+    # ---- 请求检测: METHOD 开头 ----
     for method in HTTP_METHODS:
         if first_line.startswith(method):
+            # 增强校验：确保格式为 "METHOD /uri HTTP/version"
+            parts = first_line.split()
+            if len(parts) < 2:
+                return False
+            uri = parts[1]
+            # URI 必须以 '/' 开头（排除二进制数据恰好以 GET 开头的情况）
+            # 例外: CONNECT 方法的 URI 为 "host:port" 格式（代理隧道）
+            if method == "CONNECT":
+                # CONNECT 格式: "CONNECT host:port HTTP/version"
+                if ":" not in uri:
+                    return False
+            elif not uri.startswith("/"):
+                # HTTP/1.1 允许代理请求的绝对 URI: "GET http://host/path HTTP/1.1"
+                if not (uri.startswith("http://") or uri.startswith("https://")):
+                    return False
+            # 如果有第三部分，必须是 HTTP/ 版本
+            if len(parts) >= 3 and not parts[2].startswith("HTTP/"):
+                return False
             return True
-    # 响应: 以 HTTP/ 开头
-    if first_line.startswith("HTTP/"):
-        return True
+
     return False
 
 
@@ -370,15 +404,25 @@ def _parse_http(record: TrafficRecord):
 
     # ---- 解析请求行或响应行 ----
     first_line = lines[0].strip()
+    first_line_upper = first_line.upper()
 
     # 尝试匹配: METHOD URI HTTP/version
     parts = first_line.split(" ")
-    if len(parts) >= 2 and parts[0] in HTTP_METHODS:
-        record.http_method = parts[0]
+    if len(parts) >= 2 and parts[0].upper() in HTTP_METHODS:
+        record.http_method = parts[0]  # 保留原始大小写
         record.http_uri = unquote(parts[1]) if len(parts) > 1 else ""
+        # 处理绝对 URI（代理请求）: "GET http://host/path HTTP/1.1"
+        if record.http_uri.startswith("http://") or record.http_uri.startswith("https://"):
+            # 从绝对 URI 中提取 host（如果 Headers 中没有 Host 字段）
+            if "://" in record.http_uri:
+                rest = record.http_uri.split("://", 1)[1]
+                if "/" in rest:
+                    host_part = rest.split("/", 1)[0]
+                    if not record.http_host:
+                        record.http_host = host_part
         if len(parts) >= 3:
             record.protocol_detail = parts[2]
-    elif first_line.startswith("HTTP/"):
+    elif first_line_upper.startswith("HTTP/"):
         # 响应行
         record.http_method = "RESPONSE"
         if len(parts) >= 2:
@@ -523,8 +567,14 @@ def _parse_dns_from_scapy(dns_layer, record: TrafficRecord):
 
 
 def _expand_dns_name(raw: bytes, offset: int, parts: list):
-    """展开 DNS 压缩域名"""
-    while offset < len(raw):
+    """展开 DNS 压缩域名，最多追踪 255 跳防循环指针链"""
+    max_hops = 255
+    visited = set()
+    while offset < len(raw) and max_hops > 0:
+        if offset in visited:  # 循环指针链检测
+            break
+        visited.add(offset)
+        max_hops -= 1
         length = raw[offset]
         if length == 0:
             break
@@ -553,8 +603,15 @@ def _parse_dns_answers(raw: bytes, offset: int, ancount: int, record: TrafficRec
             offset += 2  # 跳过压缩指针
         else:
             while offset < len(raw) and raw[offset] != 0:
+                # 域名中的压缩指针标记（多标签名内嵌指针）
+                if raw[offset] & 0xC0:
+                    offset += 2
+                    break
                 offset += raw[offset] + 1
-            offset += 1  # 跳过结束符
+                if offset > len(raw):
+                    break
+            if offset < len(raw) and raw[offset] == 0:
+                offset += 1  # 跳过结束符
         if offset + 10 > len(raw):
             break
         # TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2)
@@ -588,7 +645,13 @@ def _parse_dns_answers(raw: bytes, offset: int, ancount: int, record: TrafficRec
 
 def _detect_tls(record: TrafficRecord) -> bool:
     """
-    检测 TLS ClientHello / ServerHello 握手，提取版本号和 SNI。
+    检测 TLS 记录层协议，提取版本号和 SNI。
+
+    支持以下 TLS 记录类型:
+      0x14 = ChangeCipherSpec (20)
+      0x15 = Alert (21)
+      0x16 = Handshake (22) —— 含 ClientHello/ServerHello
+      0x17 = Application Data (23, 加密数据)
 
     Returns:
         True 如果检测到 TLS 内容
@@ -599,31 +662,42 @@ def _detect_tls(record: TrafficRecord) -> bool:
 
     # TLS 记录层: ContentType(1) + Version(2) + Length(2)
     content_type = raw[0]
-    if content_type == 0x16:  # 22 = Handshake
-        # TLS 版本（记录层版本）
-        if len(raw) >= 3:
-            ver_map = {
-                (0x03, 0x01): "TLS 1.0",
-                (0x03, 0x02): "TLS 1.1",
-                (0x03, 0x03): "TLS 1.2",
-                (0x03, 0x04): "TLS 1.3",
-            }
-            ver = (raw[1], raw[2])
-            record.tls_version = ver_map.get(ver, f"TLS 0x{raw[1]:02x}{raw[2]:02x}")
-            record.protocol_detail = record.tls_version
 
-        # ---- 从 ClientHello (HandshakeType=0x01) 提取 SNI ----
-        if len(raw) >= 6 and raw[5] == 0x01:  # HandshakeType: ClientHello
+    # ---- 统一版本提取 ----
+    ver_str = ""
+    if len(raw) >= 3:
+        ver_map = {
+            (0x03, 0x01): "TLS 1.0",
+            (0x03, 0x02): "TLS 1.1",
+            (0x03, 0x03): "TLS 1.2",
+            (0x03, 0x04): "TLS 1.3",
+        }
+        ver = (raw[1], raw[2])
+        ver_str = ver_map.get(ver, f"TLS 0x{raw[1]:02x}{raw[2]:02x}")
+
+    if content_type == 0x16:  # 22 = Handshake
+        record.tls_version = ver_str or "TLS (handshake)"
+        record.protocol_detail = record.tls_version
+
+        # 从 ClientHello (HandshakeType=0x01) 提取 SNI
+        if len(raw) >= 6 and raw[5] == 0x01:
             _extract_tls_sni(raw, record)
 
         return True
 
     elif content_type == 0x17:  # 23 = Application Data (加密数据)
-        if len(raw) >= 3:
-            ver = (raw[1], raw[2])
-            if ver in ((0x03, 0x01), (0x03, 0x02), (0x03, 0x03), (0x03, 0x04)):
-                record.tls_version = f"TLS (encrypted)"
-                record.protocol_detail = "TLS Application Data"
+        record.tls_version = ver_str or "TLS (encrypted)"
+        record.protocol_detail = "TLS Application Data"
+        return True
+
+    elif content_type == 0x14:  # 20 = ChangeCipherSpec
+        record.tls_version = ver_str or "TLS"
+        record.protocol_detail = "TLS ChangeCipherSpec"
+        return True
+
+    elif content_type == 0x15:  # 21 = Alert
+        record.tls_version = ver_str or "TLS"
+        record.protocol_detail = "TLS Alert"
         return True
 
     return False

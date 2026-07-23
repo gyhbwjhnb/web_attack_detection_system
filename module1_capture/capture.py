@@ -419,6 +419,18 @@ class CaptureEngine(ICaptureEngine):
                     desc = _iface_desc(iface)
                     labels = ['物理有线', '物理无线', '物理网卡', '虚拟网卡(降级)']
                     logger.info(f"自动选择网卡[{labels[level]}]: {name} — {desc} ({ip})")
+
+                    # 提示被跳过的虚拟网卡（VMware/VirtualBox 虚拟适配器）
+                    if buckets[3] and level < 3:
+                        skipped = [_iface_name(v) for v in buckets[3][:3]]
+                        logger.info(
+                            f"检测到 {len(buckets[3])} 个虚拟网卡（已跳过）: {', '.join(skipped)}"
+                            f"{'...' if len(buckets[3]) > 3 else ''}"
+                        )
+                        logger.info(
+                            "如需捕获虚拟机 NAT/仅主机模式流量，请指定: "
+                            f"python main.py -i \"{skipped[0]}\""
+                        )
                     return name
 
             # ── 彻底兜底：第一个非空桶 ──
