@@ -399,7 +399,7 @@ class SignatureEngine(ISignatureEngine):
                     continue
 
                 # --- 6. 告警去重（包含 dst_port：同主机不同端口的同类攻击不应被去重） ---
-                dedup_key = (record.src.ip, record.dst.ip, record.dst.port, rule.attack_type)
+                dedup_key = (record.src.ip, record.dst.ip, record.dst.port, rule.rule_id)
                 if self._is_dedup(dedup_key):
                     continue
 
@@ -491,10 +491,21 @@ class SignatureEngine(ISignatureEngine):
         """
         从 TrafficRecord 中提取待扫描文本。
 
-        优先使用 HTTP 全字段（URI + body + headers 等），
+        优先使用 HTTP 请求字段（URI + body + headers 等），
+        跳过 HTTP 响应（服务器返回的 HTML/JS 可能反射攻击特征造成误报），
         其次 DNS 查询域名，否则使用 payload 文本。
         """
-        # HTTP 流量：拼接所有 HTTP 相关字段
+        # HTTP 响应/数据段：跳过扫描
+        # 服务器返回的 HTML/JS/CSS 正常代码含 ../ </script> eval( 等片段，误匹配攻击规则
+        # - http_method=="RESPONSE": HTTP 响应首包（客户端端口方向）
+        # - src.port 在 HTTP 端口且无 http_uri: 响应后续数据段（纯 HTML body）
+        if record.http_method == "RESPONSE":
+            return ""
+        if (not record.http_uri and not record.http_method
+                and record.src.port in (80, 443, 8080, 8443)):
+            return ""
+
+        # HTTP 请求：拼接所有 HTTP 相关字段
         if record.http_uri or record.http_body:
             return record.all_http_text
 

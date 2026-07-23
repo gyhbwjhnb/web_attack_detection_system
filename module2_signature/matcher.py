@@ -21,7 +21,7 @@ Aho-Corasick 多模式匹配器 —— 模块2 内部组件
 
 from collections import deque
 from typing import List, Tuple, Dict, Optional
-from urllib.parse import unquote
+from urllib.parse import unquote_plus
 
 
 # 节点定义
@@ -165,12 +165,17 @@ class AhoCorasickMatcher:
     # ------------------------------------------------------------------
 
     def _normalize(self, text: str) -> str:
-        """归一化：URL 解码 + 小写化（视配置）"""
+        """归一化：URL 解码 + 合并连续空格 + 小写化（视配置）
+
+        URL 编码中 + 解码为空格，多个 + 可能产生连续空格（如 ++ → 两个空格），
+        导致 '  OR 1=1 无法匹配模式 ' OR 1=1。合并连续空格解决此问题。
+        """
+        import re
         if self._url_decode:
             prev = text
             for _ in range(3):
                 try:
-                    decoded = unquote(prev)
+                    decoded = unquote_plus(prev)
                 except Exception:
                     decoded = prev
                 if decoded == prev:
@@ -179,4 +184,6 @@ class AhoCorasickMatcher:
             text = prev
         if not self._case_sensitive:
             text = text.lower()
+        # 合并连续空白字符为单个空格（防止 ++ → 两个空格导致模式匹配失败）
+        text = re.sub(r'\s+', ' ', text)
         return text

@@ -28,6 +28,10 @@ class AbnormalOutboundDetector(IDetector):
         src_ip, dst_ip = record.src.ip, record.dst.ip
         dst_port = record.dst.port
 
+        # port=0 表示非传输层协议（IGMP/ICMP等），不是C2流量
+        if dst_port == 0 or record.src.port == 0:
+            return []
+
         if not is_private_ip(src_ip) or is_private_ip(dst_ip):
             return []
 
