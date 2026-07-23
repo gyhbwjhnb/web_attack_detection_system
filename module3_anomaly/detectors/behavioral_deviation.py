@@ -68,8 +68,9 @@ class BehavioralDeviationDetector(IDetector):
                     "检查是否在进行扫描或横向移动"
                 ))
 
-            # --- SYN 比例突变 ---
-            syn_in_window = self._count_recent(self._syn_timestamps, now, recent_window)
+            # --- SYN 比例突变（使用主机级 SYN，修复全局vs单主机错配） ---
+            syn_timestamps = getattr(host, 'syn_timestamps', [])
+            syn_in_window = self._count_recent(syn_timestamps, now, recent_window)
             syn_rate = syn_in_window / max(recent_window / 60.0, 1)
             normal_syn_rate = baseline_conn_rate * 0.3
             if syn_rate > normal_syn_rate * self._config.get("mutation_syn_ratio", 3.0) and syn_in_window > self._config.get("mutation_syn_min", 30):

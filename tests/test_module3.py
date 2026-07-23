@@ -28,12 +28,14 @@ def check(name, actual, expected):
 
 
 def make_record(src_ip="192.168.1.100", dst_ip="10.0.0.1",
-                src_port=50000, dst_port=80, syn=False, payload_size=100):
+                src_port=50000, dst_port=80, syn=False, payload_size=100,
+                payload=""):
     r = TrafficRecord()
     r.src = IPEndpoint(ip=src_ip, port=src_port)
     r.dst = IPEndpoint(ip=dst_ip, port=dst_port)
     r.protocol = ProtocolType.TCP
     r.payload_size = payload_size
+    r.payload = payload
     if syn:
         r.flags = r.FLAG_SYN
     return r
@@ -80,9 +82,11 @@ print("=" * 50)
 e3 = AnomalyEngine({"brute_force_threshold": 3, "brute_force_window_sec": 60, "enable_noise_reduction": False})
 
 for i in range(5):
-    e3.process_traffic(make_record(dst_ip="10.0.0.5", dst_port=22, syn=True))
+    e3.process_traffic(make_record(dst_ip="10.0.0.5", dst_port=22, syn=True,
+                                    payload="Login failed for user root"))
 
-alerts = e3.process_traffic(make_record(dst_ip="10.0.0.5", dst_port=22, syn=True))
+alerts = e3.process_traffic(make_record(dst_ip="10.0.0.5", dst_port=22, syn=True,
+                                         payload="Login failed for user root"))
 brute = [a for a in alerts if a.attack_type == "brute_force"]
 check("brute_detected", len(brute) >= 1, True)
 if brute:
@@ -99,13 +103,15 @@ print("=" * 50)
 e4 = AnomalyEngine({"enable_noise_reduction": False})
 
 alerts = e4.process_traffic(make_record(src_ip="192.168.1.50", dst_ip="203.0.113.99", dst_port=4444, syn=True))
+# 新行为：首次连接非标准端口不告警，第二次才告警
+alerts = e4.process_traffic(make_record(src_ip="192.168.1.50", dst_ip="203.0.113.99", dst_port=4444, syn=True))
 out = [a for a in alerts if a.attack_type == "abnormal_outbound"]
 check("outbound_detected", len(out) >= 1, True)
 if out:
     check("outbound_dst", out[0].dst_ip, "203.0.113.99")
 
-# 去重：相同外部 IP 不重复告警
-alerts2 = e4.process_traffic(make_record(src_ip="192.168.1.50", dst_ip="203.0.113.99", dst_port=5555))
+# 标准端口（443）永远不告警
+alerts2 = e4.process_traffic(make_record(src_ip="192.168.1.50", dst_ip="93.184.216.34", dst_port=443, syn=True))
 out2 = [a for a in alerts2 if a.attack_type == "abnormal_outbound"]
 check("outbound_dedup", len(out2), 0)
 
@@ -251,7 +257,8 @@ cb_alerts = []
 e12.set_on_alert_callback(lambda a: cb_alerts.append(a))
 
 for i in range(5):
-    e12.process_traffic(make_record(dst_ip="10.0.0.99", dst_port=22, syn=True))
+    e12.process_traffic(make_record(dst_ip="10.0.0.99", dst_port=22, syn=True,
+                                     payload="password incorrect for admin"))
 
 check("callback_trig_brute", len(cb_alerts) >= 1, True)
 

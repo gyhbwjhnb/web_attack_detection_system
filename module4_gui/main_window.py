@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from common import message_bus
 from common.data_structures import Alert, AlertSeverity, AttackChain, TrafficRecord
-from common.config import UI_CONFIG, SEVERITY_LEVELS, ATTACK_TYPES, ANOMALY_CONFIG, CAPTURE_CONFIG, WHITELIST_IPS
+from common.config import UI_CONFIG, SEVERITY_LEVELS, ATTACK_TYPES, ANOMALY_CONFIG, REALTIME_ANOMALY_CONFIG, CAPTURE_CONFIG, WHITELIST_IPS
 from common.utils import setup_logger
 
 logger = setup_logger("module4_gui", "logs/module4.log")
@@ -1940,17 +1940,18 @@ class ConfigDialog(tk.Toplevel):
         ttk.Button(btn_frame, text="取消", command=self.destroy).pack(side=tk.LEFT, padx=4)
 
     def _save(self):
-        """保存配置到全局配置"""
-        ANOMALY_CONFIG["port_scan_threshold"] = self._port_scan_thresh.get()
-        ANOMALY_CONFIG["port_scan_window_sec"] = self._port_scan_window.get()
-        ANOMALY_CONFIG["brute_force_threshold"] = self._brute_thresh.get()
-        ANOMALY_CONFIG["brute_force_window_sec"] = self._brute_window.get()
-        ANOMALY_CONFIG["syn_flood_threshold"] = self._syn_thresh.get()
-        ANOMALY_CONFIG["bandwidth_anomaly_threshold"] = self._bw_thresh.get()
+        """保存配置到全局配置（同时更新两套配置确保生效）"""
+        for cfg in (ANOMALY_CONFIG, REALTIME_ANOMALY_CONFIG):
+            cfg["port_scan_threshold"] = self._port_scan_thresh.get()
+            cfg["port_scan_window_sec"] = self._port_scan_window.get()
+            cfg["brute_force_threshold"] = self._brute_thresh.get()
+            cfg["brute_force_window_sec"] = self._brute_window.get()
+            cfg["syn_flood_threshold"] = self._syn_thresh.get()
+            cfg["bandwidth_anomaly_threshold"] = self._bw_thresh.get()
         UI_CONFIG["refresh_interval"] = self._refresh_sec.get()
 
         message_bus.publish(message_bus.EVENT_CONFIG_CHANGE, {"anomaly": dict(ANOMALY_CONFIG)})
-        messagebox.showinfo("成功", "配置已保存")
+        messagebox.showinfo("成功", "配置已保存（已同步到两套阈值配置）")
         self.destroy()
 
 

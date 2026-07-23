@@ -26,19 +26,27 @@ class AbnormalOutboundDetector(IDetector):
 
     def process(self, record: TrafficRecord, now: float) -> List[Alert]:
         src_ip, dst_ip = record.src.ip, record.dst.ip
+        dst_port = record.dst.port
 
         if not is_private_ip(src_ip) or is_private_ip(dst_ip):
             return []
-        if dst_ip in self._known_external:
+
+        key = (dst_ip, dst_port)
+
+        # 标准端口：静默记录，永不告警（正常上网行为）
+        if dst_port in self.STANDARD_PORTS:
+            self._known_external.add(key)
             return []
 
-        self._known_external.add(dst_ip)
+        # 非标准端口：首次连接记录，第二次+才告警
+        if key in self._known_external:
+            return [self._make_alert(
+                record, "abnormal_outbound", AlertSeverity.HIGH,
+                f"异常外联: 内网 {src_ip} → 外部 {dst_ip}:{dst_port}（非标准端口重复连接）",
+                f"重复外联 {dst_ip}:{dst_port}",
+                "检查该主机是否感染恶意软件或存在 C2 通信，建议临时隔离"
+            )]
 
-        severity = AlertSeverity.HIGH if record.dst.port not in self.STANDARD_PORTS else AlertSeverity.MEDIUM
-
-        return [self._make_alert(
-            record, "abnormal_outbound", severity,
-            f"异常外联: 内网 {src_ip} → 外部 {dst_ip}:{record.dst.port}",
-            f"未知外部IP {dst_ip}:{record.dst.port}",
-            "检查该主机是否感染恶意软件或存在 C2 通信，建议临时隔离"
-        )]
+        # 首次连接非标准端口：静默记录，暂不告警
+        self._known_external.add(key)
+        return []

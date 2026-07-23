@@ -50,6 +50,7 @@ class HostStats:
 
         # ---- 时间戳记录（用于滑动窗口统计） ----
         self.conn_timestamps: List[float] = []          # 每条连接的时间戳
+        self.syn_timestamps: List[float] = []            # 本主机 SYN 包时间戳
         self.port_timestamps: Dict[int, List[float]] = defaultdict(list)
         self.peer_timestamps: Dict[str, List[float]] = defaultdict(list)
         self.service_attempts: Dict[Tuple[str, int], List[float]] = defaultdict(list)
@@ -377,6 +378,7 @@ class AnomalyEngine(IAnomalyEngine):
 
             if record.is_syn():
                 host.total_syn += 1
+                host.syn_timestamps.append(now)  # per-host SYN
                 self._syn_timestamps.append(now)
 
         # ---- 学习模式 ----
