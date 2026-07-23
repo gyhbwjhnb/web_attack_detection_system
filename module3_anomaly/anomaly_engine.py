@@ -83,7 +83,7 @@ class AnomalyEngine(IAnomalyEngine):
         alerts = engine.process_traffic(record)
     """
 
-    SENSITIVE_PORTS = {21, 22, 23, 3389, 3306, 5432, 6379, 27017, 1433, 8080, 8443}
+    SENSITIVE_PORTS = {21, 22, 23, 80, 443, 3389, 3306, 5432, 6379, 27017, 1433, 8080, 8443}
 
     def __init__(self, config: dict = None, detectors: list = None):
         self._config = config or ANOMALY_CONFIG

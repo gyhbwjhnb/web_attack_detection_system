@@ -94,6 +94,8 @@ python tests/quick_test.py
 | 热加载 | `data/rules/` 下 JSON 文件变化 3 秒内自动重载，无需重启 |
 | 导入规则 | GUI 工具栏 `📂 导入规则` 按钮 / 菜单「配置 → 导入自定义规则…」 |
 | 规则格式 | 帮助 → 使用帮助 →「自定义规则」标签页完整参考 |
+| ★ 加密流量跳过特征匹配 | TLS/HTTPS 等加密流量自动识别并跳过特征匹配（4 重检测：TLS标记/加密端口/首字节/熵值），大幅减少误报 |
+| ★ 短模式防护 | 长度 < 4 的短模式特征仅在 HTTP 上下文中匹配，避免二进制数据误报 |
 
 ### 3.4 GUI 功能
 
@@ -131,11 +133,14 @@ network_attack_detection/
 ├── module1_capture/             # 模块一：数据包捕获与预处理
 │   ├── capture.py               # 抓包引擎（在线/离线/模拟 三种模式）
 │   ├── packet_parser.py         # 协议解析（HTTP/DNS/TLS/ICMP/ARP...）
+│   │                             #   - HTTP 增强校验防二进制误判 + 代理URI/CONNECT
+│   │                             #   - DNS 防循环指针解析 + 多标签压缩指针
+│   │                             #   - TLS 全记录类型支持（Handshake/AppData/CCS/Alert）
 │   ├── demo_module1.py          # 功能演示（模拟/PCAP/MessageBus/性能）
 │   └── demo_live_capture.py     # 在线抓包演示
 │
 ├── module2_signature/           # 模块二：特征匹配检测引擎
-│   ├── signature_engine.py      # 规则匹配 + 热加载 + 暴力破解统计 + 告警去重
+│   ├── signature_engine.py      # 规则匹配 + 热加载 + 暴力破解统计 + 告警去重 + ★ 加密流量识别 + ★ DNS隧道检测 + 短模式防护
 │   ├── matcher.py               # Aho-Corasick 多模式匹配器（URL 解码对抗）
 │   └── integration.py           # MessageBus 集成（一行 connect 完成订阅）
 │
@@ -241,7 +246,7 @@ pyinstaller NetworkAttackDetector.spec --clean
 
 | 问题 | 回答 |
 |------|------|
-| 为什么大量误报？ | 真实环境用 main.py（高阈值），别用 tests/live_demo.py（低阈值演示用） |
+| 为什么大量误报？ | 真实环境用 main.py（高阈值），别用 tests/live_demo.py（低阈值演示用）。加密流量（TLS/HTTPS）已被自动跳过特征匹配，大幅减少误报 |
 | 无法打开 GUI？ | `python -c "import tkinter"` 检查 |
 | 流量显示为空？ | 需要 Npcap + 管理员权限实时抓包；或使用 --pcap 离线分析 |
 | 端口扫描误报？ | 将网关/DNS/打印机加入白名单 |
